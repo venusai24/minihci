@@ -267,3 +267,28 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   recomputed, not true counters, so they shrink if task rows are ever deleted.
 - **How to undo:** Switch to `prometheus_client` multiprocess mode with counters incremented in the
   executor, or add an index/rollup table if scrapes get slow.
+
+## D-022 Placement: best-fit on allocated memory, 80% vCPU headroom, config row changed by a task
+- **Context:** FR-3.2 asks for a documented policy when `POST /vms` names no host, and a 409 when
+  nothing fits. Measured host load (Q07) does not exist yet, and the PRD does not say how the
+  scheduler config is stored or changed. CLAUDE.md requires every mutating endpoint to write a task row.
+- **Decision:** `scheduler/placement.py` `place(vm_req, hosts, usage, config)` is pure. Candidates
+  are hosts whose status is in `PLACEABLE_STATUSES = ("ready",)` (Q10 changes it to `up`) and whose
+  `cpu_total`/`mem_total_mb` are known. Usage is *allocated*, not measured: sums of `vcpus`/`mem_mb`
+  of VMs on the host with `desired_state <> 'absent'` (pending creates count). A host fits if
+  `mem_used + mem_mb <= mem_total_mb` and `vcpus_used + vcpus <= floor(cpu_total * cpu_headroom_pct / 100)`.
+  Best-fit: pick the fitting host with the least free memory left after placement, ties → lowest id.
+  None fits → `NoCapacity` → API 409 with no VM or task row. To stop two creates from both taking
+  the last slot, the auto-placement path takes `pg_advisory_xact_lock(3, 0)` and `FOR SHARE` on
+  the candidate hosts (keeps D-016's create/remove ordering). An explicit `host_id` keeps today's
+  behaviour (no capacity check). Config lives in table `scheduler_config` (revision 0005): one row,
+  `id = 1` (CHECK), `cpu_headroom_pct int NOT NULL DEFAULT 80 CHECK 1..100`, `updated_at`; seeded
+  by the migration, and `load_config` returns defaults if the row is missing. `GET /scheduler/config`
+  reads it. `PUT` goes through `run_idempotent` and enqueues `scheduler.config_set` (target_kind
+  `scheduler`, lock namespace 3, target_id 1) whose single step overwrites the row → 202 + task_id.
+- **Consequences:** Placement is deterministic and easy to table-test, and it ignores real load, so
+  a busy host with little allocated memory still gets VMs until Q09 rebalances. The config change
+  is async (visible after the worker runs it), the price of keeping the 202 rule. Q09 adds its
+  threshold/cooldown columns to the same row.
+- **How to undo:** Make `host_id` required again and drop `api/scheduler.py`, the task type and
+  revision 0005. To switch to measured load, feed `place` the latest `host_metrics` instead of allocations.
