@@ -1,6 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import sessionmaker
 
+from minihci.api import hosts, tasks
+from minihci.api.idempotency import IdempotencyConflict
 from minihci.config import Settings
 from minihci.db import make_engine, make_session_factory
 
@@ -11,6 +14,17 @@ def create_app(settings: Settings, session_factory: sessionmaker | None = None) 
         session_factory = make_session_factory(make_engine(settings.database_url))
     app.state.settings = settings
     app.state.session_factory = session_factory
+
+    app.include_router(hosts.router)
+    app.include_router(tasks.router)
+
+    @app.exception_handler(IdempotencyConflict)
+    def _conflict(_: Request, exc: IdempotencyConflict) -> JSONResponse:
+        return JSONResponse({"detail": str(exc), "task_id": exc.task_id}, status_code=409)
+
+    @app.exception_handler(ValueError)
+    def _bad_value(_: Request, exc: ValueError) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=400)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

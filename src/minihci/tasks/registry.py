@@ -6,3 +6,6 @@ REGISTRY: dict[str, TaskType] = {}
 def register(tt: TaskType) -> TaskType:
     REGISTRY[tt.name] = tt
     return tt
+
+
+from minihci.tasks import types as _types  # noqa: E402,F401  (populate REGISTRY)
