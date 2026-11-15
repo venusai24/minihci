@@ -1,4 +1,5 @@
 import ast
+from datetime import UTC
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -93,3 +94,35 @@ def test_metrics_task_duration_histogram(session_factory):
     assert abs(samples[("minihci_task_duration_seconds_sum", (("type", "host.register"),))] - 20.75) < 1e-6
     assert b("vm.create", "300.0") == 0
     assert b("vm.create", "+Inf") == 1
+
+
+def test_metrics_host_status_and_heartbeat(session_factory):
+    from datetime import datetime
+
+    from minihci.models import Host
+
+    hb = datetime(2026, 1, 1, tzinfo=UTC)
+    with session_factory() as s:
+        s.add(Host(name="a", libvirt_uri="u://a", status="ready", last_heartbeat=hb))
+        s.add(Host(name="b", libvirt_uri="u://b", status="failed"))
+        s.add(Host(name="c", libvirt_uri="u://c", status="removed"))
+        s.commit()
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    text = client.get("/metrics").text
+    st = _samples(text, "minihci_host_status")
+    assert st[(("host", "a"), ("status", "ready"))] == 1
+    assert st[(("host", "a"), ("status", "failed"))] == 0
+    assert st[(("host", "b"), ("status", "failed"))] == 1
+    assert not any(k[0] == ("host", "c") for k in st)
+    h = _samples(text, "minihci_host_last_heartbeat_timestamp_seconds")
+    assert h == {(("host", "a"),): hb.timestamp()}
+
+
+def test_metrics_migration_families_present_empty(session_factory):
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    text = client.get("/metrics").text
+    fams = {f.name: f for f in text_string_to_metric_families(text)}
+    for name in ("minihci_migration_duration_seconds", "minihci_migration_downtime_seconds"):
+        assert fams[name].type == "histogram"
+        counts = [s.value for s in fams[name].samples if s.name.endswith("_count")]
+        assert counts == [0]

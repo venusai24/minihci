@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from datetime import UTC
 
 from fastapi import APIRouter, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
@@ -6,12 +7,13 @@ from prometheus_client.core import GaugeMetricFamily, HistogramMetricFamily, Met
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
-from minihci.models import Task
+from minihci.models import Host, Task
 
 router = APIRouter()
 
 BUCKETS = (0.1, 0.5, 1.0, 5.0, 15.0, 60.0, 300.0)
 FINISHED_STATES = ("succeeded", "failed", "rolled_back")
+HOST_STATUSES = ("registering", "ready", "failed", "removing")
 
 
 class DbCollector:
@@ -26,6 +28,35 @@ class DbCollector:
             g.add_metric([type_, state], n)
         yield g
         yield self._task_durations()
+        yield from self._hosts()
+        # Q08 must fill these from the migrations table; empty until then.
+        yield self._empty_histogram("minihci_migration_duration_seconds", "Migration duration in seconds")
+        yield self._empty_histogram("minihci_migration_downtime_seconds", "Migration downtime in seconds")
+
+    @staticmethod
+    def _empty_histogram(name: str, doc: str) -> HistogramMetricFamily:
+        h = HistogramMetricFamily(name, doc)
+        h.add_metric([], [(str(float(b)), 0.0) for b in BUCKETS] + [("+Inf", 0.0)], 0.0)
+        return h
+
+    def _hosts(self) -> Iterator[Metric]:
+        with self._sf() as s:
+            rows = s.execute(
+                select(Host.name, Host.status, Host.last_heartbeat).where(Host.status != "removed").order_by(Host.name)
+            ).all()
+        st = GaugeMetricFamily("minihci_host_status", "Host status (one-hot)", labels=["host", "status"])
+        hb = GaugeMetricFamily(
+            "minihci_host_last_heartbeat_timestamp_seconds", "Last host heartbeat (unix time)", labels=["host"]
+        )
+        for name, status, beat in rows:
+            for known in HOST_STATUSES:
+                st.add_metric([name, known], 1.0 if status == known else 0.0)
+            if beat is not None:
+                if beat.tzinfo is None:
+                    beat = beat.replace(tzinfo=UTC)
+                hb.add_metric([name], beat.timestamp())
+        yield st
+        yield hb
 
     def _task_durations(self) -> HistogramMetricFamily:
         with self._sf() as s:
