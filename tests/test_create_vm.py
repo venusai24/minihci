@@ -28,7 +28,13 @@ def client(session_factory):
 
 
 def body(host_id, **kw):
-    return {"name": "web1", "host_id": host_id, "vcpus": 1, "mem_mb": 512, "image": "/img/alpine.qcow2"} | kw
+    return {
+        "name": "web1",
+        "host_id": host_id,
+        "vcpus": 1,
+        "mem_mb": 512,
+        "image": "/srv/minihci/base/alpine.qcow2",
+    } | kw
 
 
 def test_create_vm_end_to_end(client, session_factory, driver, host_id):
@@ -114,3 +120,35 @@ def test_replay_after_success_returns_original(client, session_factory, driver, 
     b = client.post("/vms", json=body(host_id), headers=h)
     assert b.status_code == 202 and b.json() == a.json()
     assert len(client.get("/vms").json()) == 1
+
+
+@pytest.mark.parametrize(
+    "image", ["alpine.qcow2", "/etc/passwd", "/srv/minihci/base/../../../etc/passwd", "/srv/minihci/base-evil/a.qcow2"]
+)
+def test_image_outside_root_422(client, session_factory, host_id, image):
+    assert client.post("/vms", json=body(host_id, image=image)).status_code == 422
+    assert client.get("/vms").json() == []
+
+
+def test_worker_rejects_image_outside_root(session_factory, driver, host_id):
+    from minihci.models import Vm
+    from minihci.tasks.engine import enqueue
+
+    with session_factory() as s, s.begin():
+        vm = Vm(
+            name="evil",
+            host_id=host_id,
+            vcpus=1,
+            mem_mb=512,
+            image="/etc/passwd",
+            disk_path="/srv/test-images/evil.qcow2",
+            desired_state="running",
+            actual_state="pending",
+        )
+        s.add(vm)
+        s.flush()
+        tid = enqueue(s, "vm.create", vm.id, {}).id
+    drain(session_factory, driver)
+    t = load_task(session_factory, tid)
+    assert t.state == "rolled_back" and "image path must be under" in t.error
+    assert not driver.disk_exists("/srv/test-images/evil.qcow2")

@@ -30,7 +30,8 @@ def start_create_and_kill(session_factory, tmp_path, step, where):
     add_ready_host(session_factory, FakeDriver(state_file=state))
     client = TestClient(create_app(Settings(storage_root="/srv/test-images"), session_factory=session_factory))
     tid = client.post(
-        "/vms", json={"name": "web1", "host_id": 1, "vcpus": 1, "mem_mb": 512, "image": "/img/alpine.qcow2"}
+        "/vms",
+        json={"name": "web1", "host_id": 1, "vcpus": 1, "mem_mb": 512, "image": "/srv/minihci/base/alpine.qcow2"},
     ).json()["task_id"]
     env_key = "MINIHCI_FAKE_DELAYS" if where == "before" else "MINIHCI_FAKE_DELAYS_AFTER"
     w1 = spawn_worker(state, {env_key: json.dumps({STEP_TO_METHOD[step]: 30})})

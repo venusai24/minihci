@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://minihci:minihci@localhost:5433/minihci"
     driver: Literal["fake", "libvirt"] = "fake"
     storage_root: str = "/srv/minihci/images"
+    image_root: str = "/srv/minihci/base"
     fake_state_file: Path | None = None
     fake_delays: dict[str, float] = {}  # driver method -> seconds, slept BEFORE the effect
     fake_delays_after: dict[str, float] = {}  # slept AFTER the effect

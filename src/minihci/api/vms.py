@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from minihci.api.deps import get_session
 from minihci.api.idempotency import fingerprint, run_idempotent
 from minihci.models import Host, Vm
+from minihci.paths import resolve_image
 from minihci.tasks.engine import enqueue
 
 router = APIRouter()
@@ -30,6 +31,10 @@ def create_vm(
     idempotency_key: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     settings = request.app.state.settings
+    try:
+        resolve_image(body.image, settings.image_root)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
 
     def create(s: Session):
         # Runs only on an idempotency-key miss, so a replay never trips the name check below.

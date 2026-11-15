@@ -1,5 +1,6 @@
 from minihci.driver.base import DomainSpec, DomainState
 from minihci.models import Host, Vm
+from minihci.paths import resolve_image
 from minihci.tasks.executor import Step, StepContext, TaskType
 from minihci.tasks.registry import register
 
@@ -17,8 +18,9 @@ def _load(ctx: StepContext) -> tuple[Vm, str]:
 
 def create_disk(ctx: StepContext) -> None:
     vm, _ = _load(ctx)
+    image = resolve_image(vm.image, ctx.settings.image_root)  # ValueError fails the step -> rollback
     if not ctx.driver.disk_exists(vm.disk_path):
-        ctx.driver.create_disk_overlay(vm.image, vm.disk_path)
+        ctx.driver.create_disk_overlay(image, vm.disk_path)
 
 
 def undo_create_disk(ctx: StepContext) -> None:
