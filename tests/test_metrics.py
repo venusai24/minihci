@@ -45,3 +45,51 @@ def test_api_modules_do_not_import_driver():
             elif isinstance(node, ast.ImportFrom):
                 names = [node.module or ""] + [f"{node.module}.{a.name}" for a in node.names]
             assert not any(n.startswith("minihci.driver") for n in names), path
+
+
+def test_metrics_task_duration_histogram(session_factory):
+    from datetime import datetime, timedelta
+
+    from minihci.models import Task
+
+    t0 = datetime(2026, 1, 1)
+    durations = [
+        ("host.register", "succeeded", 0.05),
+        ("host.register", "failed", 0.7),
+        ("host.register", "rolled_back", 20.0),
+        ("host.register", "running", 3.0),
+        ("vm.create", "succeeded", 400.0),
+    ]
+    with session_factory() as s:
+        for i, (typ, state, d) in enumerate(durations):
+            s.add(
+                Task(
+                    type=typ,
+                    target_id=i,
+                    state=state,
+                    started_at=t0,
+                    finished_at=t0 + timedelta(seconds=d) if state != "running" else None,
+                )
+            )
+        s.commit()
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    text = client.get("/metrics").text
+    got = _samples(text, "minihci_task_duration_seconds")
+
+    def b(typ, le):
+        return got[tuple(sorted({"type": typ, "le": le}.items()))]
+
+    assert b("host.register", "0.1") == 1
+    assert b("host.register", "0.5") == 1
+    assert b("host.register", "1.0") == 2
+    assert b("host.register", "15.0") == 2
+    assert b("host.register", "60.0") == 3
+    assert b("host.register", "+Inf") == 3
+    fams = {f.name: f for f in text_string_to_metric_families(text)}
+    samples = {
+        (s.name, tuple(sorted(s.labels.items()))): s.value for s in fams["minihci_task_duration_seconds"].samples
+    }
+    assert samples[("minihci_task_duration_seconds_count", (("type", "host.register"),))] == 3
+    assert abs(samples[("minihci_task_duration_seconds_sum", (("type", "host.register"),))] - 20.75) < 1e-6
+    assert b("vm.create", "300.0") == 0
+    assert b("vm.create", "+Inf") == 1
