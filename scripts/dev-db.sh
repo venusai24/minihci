@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Idempotently start the dev/test Postgres container and ensure the test DB exists.
 set -euo pipefail
-NAME=minihci-pg
+NAME=minihci-pg17  # distinct from any pre-existing minihci-pg container
 if ! podman container exists "$NAME"; then
   podman run -d --name "$NAME" \
     -e POSTGRES_USER=minihci -e POSTGRES_PASSWORD=minihci -e POSTGRES_DB=minihci \
