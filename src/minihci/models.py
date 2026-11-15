@@ -31,7 +31,9 @@ class Vm(Base):
     __tablename__ = "vms"
     __table_args__ = (
         CheckConstraint("desired_state in ('running','stopped','absent')", name="ck_vms_desired_state"),
-        CheckConstraint("actual_state in ('pending','running','stopped','absent','error')", name="ck_vms_actual_state"),
+        CheckConstraint(
+            "actual_state in ('pending','running','stopped','absent','error','missing')", name="ck_vms_actual_state"
+        ),
         Index("uq_vms_name_live", "name", unique=True, postgresql_where=text("desired_state <> 'absent'")),
     )
 

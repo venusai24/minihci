@@ -135,3 +135,14 @@ def test_migration_roundtrip(engine):
     assert "tasks" not in inspect(engine).get_table_names()
     command.upgrade(cfg, "head")
     assert "tasks" in inspect(engine).get_table_names()
+
+
+def test_vm_actual_state_missing_accepted_and_bogus_rejected(session_factory):
+    with session_factory() as s:
+        h = make_host(s)
+        s.add(_vm(h, actual_state="missing"))
+        s.commit()
+        assert s.scalars(select(Vm)).one().actual_state == "missing"
+        s.add(_vm(h, name="web2", path="/srv/w2.qcow2", actual_state="bogus"))
+        with pytest.raises(IntegrityError, match="ck_vms_actual_state"):
+            s.commit()

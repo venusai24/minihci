@@ -87,6 +87,8 @@ def assert_db_matches_driver(session_factory, driver) -> None:
                 continue
             assert state is None, f"{vm.name}: db absent, driver {state}"
             assert not driver.disk_exists(vm.disk_path), f"{vm.name}: leaked disk"
+        elif vm.actual_state == "missing":  # like "no domain" (D-020); the row keeps its name and disk record
+            assert state is None, f"{vm.name}: db missing, driver {state}"
         else:
             raise AssertionError(f"{vm.name} left in actual_state={vm.actual_state}")
     for h in hosts.values():
