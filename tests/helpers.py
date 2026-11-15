@@ -76,6 +76,10 @@ def assert_db_matches_driver(session_factory, driver) -> None:
             assert state == DomainState.RUNNING, f"{vm.name}: db running, driver {state}"
             assert driver.disk_exists(vm.disk_path), f"{vm.name}: disk missing"
             tracked.add((uri, vm.name))
+        elif vm.actual_state == "stopped":
+            assert state == DomainState.SHUT_OFF, f"{vm.name}: db stopped, driver {state}"
+            assert driver.disk_exists(vm.disk_path), f"{vm.name}: disk missing"
+            tracked.add((uri, vm.name))
         elif vm.actual_state == "absent":
             if (uri, vm.name) in live_names:  # name reused by a live VM; its row covers the domain state
                 if vm.disk_path != live_names[(uri, vm.name)]:
