@@ -106,3 +106,42 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   stored as given (validation comes in Q01).
 - **Consequences:** Every mutating request is 202 + task_id. `GET /tasks/{id}` is how a client
   sees the result.
+
+## D-012 VM names are unique only among live VMs (partial unique index)
+- **Context:** D-010 keeps rolled-back VM rows with `desired_state='absent'`, but `vms.name` is a
+  plain UNIQUE, so a failed create blocks the name forever (Q01). Options: free the name on
+  rollback (rename the row, e.g. `web1~42`) or a partial unique index.
+- **Decision:** Alembic revision `0002` drops the plain unique constraint on `vms.name` and creates
+  `uq_vms_name_live`: `UNIQUE (name) WHERE desired_state <> 'absent'`. `models.Vm` declares the same
+  index (`Index(..., unique=True, postgresql_where=...)`). The API name check in `api/vms.py`
+  filters `desired_state != 'absent'`; the IntegrityError fallback stays for races.
+- **Consequences:** Audit rows keep their real name; several `absent` rows may share a name.
+  A VM whose rollback *failed* keeps `desired_state` non-absent (on_rolled_back does not run), so
+  its name, and the derived disk path `{storage_root}/{name}.qcow2`, stay reserved until it is
+  cleaned up. Q03's delete frees a name the same way (sets `absent`). Lookups by name must filter live rows.
+- **How to undo:** Downgrade 0002 (fails if duplicate names exist; delete absent rows first).
+
+## D-013 Rollback runs every undo, even after one fails
+- **Context:** D-007 stops at the first failing undo, leaving earlier steps' effects in place.
+- **Decision:** `rollback_task` walks all eligible steps in reverse; a failing undo is marked
+  `undo_failed` with its error, and the loop continues. If any undo failed, `on_rolled_back` is
+  skipped and the task ends `failed` with every undo error joined into `tasks.error`; otherwise
+  as before. A worker dying mid-rollback leaves the task `running` with `undone`/`undo_failed`
+  steps, so `recovery._was_rolling_back` resumes the rollback; `undo_failed` steps are retried
+  (undos check state first, so this is safe). Supersedes the stop rule in D-007.
+- **Consequences:** Maximum cleanup per attempt. A `failed` task with `undo_failed` steps needs
+  an operator (or a later reconciler) to clean up; it is not retried automatically once terminal.
+- **How to undo:** Restore the early `return` in the except branch of `rollback_task`.
+
+## D-014 Image paths must live under `Settings.image_root`
+- **Context:** `VmIn.image` was stored as given (D-011), so a client could point a VM at any host file.
+- **Decision:** New `Settings.image_root` (env `MINIHCI_IMAGE_ROOT`, default `/srv/minihci/base`).
+  The API (422) requires an absolute path with no `..` component whose `os.path.realpath` lies
+  under `realpath(image_root)`; this is a string/filesystem check only, never a driver call
+  (D-011 holds). `vm_create.create_disk` re-runs the same helper before calling the driver and
+  fails the step (task rolls back) if it no longer passes. One shared helper, e.g.
+  `minihci.paths.resolve_image(path, root) -> str` raising `ValueError`.
+- **Consequences:** Symlinks pointing out of the root are rejected wherever the path exists
+  locally; on hosts where the API cannot see NFS, the check is lexical and the worker re-check is
+  the backstop. A real-host driver should resolve on the host too (Q13 note).
+- **How to undo:** Drop the validator; images are trusted again.
