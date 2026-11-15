@@ -41,3 +41,42 @@ def drain(session_factory, driver, registry=None, settings=None) -> list[int]:
     while (tid := w.run_once()) is not None:
         done.append(tid)
     return done
+
+
+from sqlalchemy import select
+
+from minihci.driver.base import DomainState
+from minihci.models import Host, Vm
+
+
+def add_ready_host(session_factory, driver, name="a", uri="qemu+ssh://a/system") -> int:
+    driver.add_host(uri, 8, 16384)
+    with session_factory() as s:
+        h = Host(name=name, libvirt_uri=uri, status="ready", cpu_total=8, mem_total_mb=16384)
+        s.add(h)
+        s.commit()
+        return h.id
+
+
+def assert_db_matches_driver(session_factory, driver) -> None:
+    with session_factory() as s:
+        live = s.scalars(select(Task).where(Task.state.in_(["pending", "running"]))).all()
+        assert live == [], f"unfinished tasks: {[t.id for t in live]}"
+        hosts = {h.id: h for h in s.scalars(select(Host))}
+        vms = s.scalars(select(Vm)).all()
+    tracked = set()
+    for vm in vms:
+        uri = hosts[vm.host_id].libvirt_uri
+        state = driver.domain_state(uri, vm.name)
+        if vm.actual_state == "running":
+            assert state == DomainState.RUNNING, f"{vm.name}: db running, driver {state}"
+            assert driver.disk_exists(vm.disk_path), f"{vm.name}: disk missing"
+            tracked.add((uri, vm.name))
+        elif vm.actual_state == "absent":
+            assert state is None, f"{vm.name}: db absent, driver {state}"
+            assert not driver.disk_exists(vm.disk_path), f"{vm.name}: leaked disk"
+        else:
+            raise AssertionError(f"{vm.name} left in actual_state={vm.actual_state}")
+    for h in hosts.values():
+        for name in driver.list_domains(h.libvirt_uri):
+            assert (h.libvirt_uri, name) in tracked, f"untracked domain {name} on {h.libvirt_uri}"
