@@ -57,15 +57,30 @@ def test_failure_rolls_back_in_reverse_including_failed_step(session_factory):
     assert "boom in b" in t.error and t.finished_at is not None
 
 
-def test_failed_undo_ends_failed_with_both_errors(session_factory):
+def test_all_undos_failing_marks_every_step_undo_failed(session_factory):
     calls = []
     tt = make_three_step_type(calls, fail_at="b", undo_fails=True)
     tid = claimed(session_factory)
     assert run(session_factory, tt, tid) == TaskState.FAILED
     t = load_task(session_factory, tid)
-    assert calls == [("do", "a"), ("do", "b"), ("undo", "b")]
-    assert statuses(t) == [("a", "done"), ("b", "undo_failed"), ("c", "pending")]
-    assert "boom in b" in t.error and "undo broke b" in t.error
+    assert calls == [("do", "a"), ("do", "b"), ("undo", "b"), ("undo", "a")]
+    assert statuses(t) == [("a", "undo_failed"), ("b", "undo_failed"), ("c", "pending")]
+    assert "boom in b" in t.error
+    assert "undo of b failed: undo broke b" in t.error and "undo of a failed: undo broke a" in t.error
+
+
+def test_rollback_continues_past_failing_undo(session_factory):
+    calls, hits = [], []
+    base = make_three_step_type(calls, fail_at="c", undo_fails={"b"})
+    tt = TaskType(base.name, "vm", base.steps, on_rolled_back=lambda ctx: hits.append(1))
+    tid = claimed(session_factory)
+    assert run(session_factory, tt, tid) == TaskState.FAILED
+    t = load_task(session_factory, tid)
+    assert calls == [("do", "a"), ("do", "b"), ("do", "c"), ("undo", "c"), ("undo", "b"), ("undo", "a")]
+    assert statuses(t) == [("a", "undone"), ("b", "undo_failed"), ("c", "undone")]
+    assert hits == []
+    assert t.error.startswith("step c failed: boom in c; undo of b failed: undo broke b")
+    assert t.finished_at is not None
 
 
 def test_resume_skips_done_steps_and_reruns_running_one(session_factory):

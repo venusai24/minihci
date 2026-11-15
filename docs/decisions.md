@@ -66,14 +66,14 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   while tasks of that type are in flight.
 - **How to undo:** Add a `task_steps` table. The executor API stays the same.
 
-## D-007 Rollback semantics (as built; Q01 changes the stop-at-first-failure rule)
+## D-007 Rollback semantics (as built; stop-at-first-failure rule superseded by D-013)
 - **Decision:** `rollback_task` walks the steps in reverse and undoes any step marked
   `done|failed|running|undo_failed`. The failed or interrupted step is included, so its partial
   effect is undone too. If every undo succeeds, the type's `on_rolled_back` hook runs and the task
   ends `rolled_back`. The **first** undo that fails stops the rollback, and the task ends `failed`
   with both errors.
 - **Consequences:** It is simple, but one bad undo leaves the later undos unrun (known gap, Q01).
-- **How to undo:** Q01 continues past a failed undo.
+- **How to undo:** Superseded by D-013, which continues past a failed undo.
 
 ## D-008 Orphan recovery rules
 - **Decision:** At worker start, `recover_orphans` looks at every `running` task:

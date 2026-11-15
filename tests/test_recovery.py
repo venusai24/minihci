@@ -3,6 +3,7 @@ from sqlalchemy import func
 from minihci.config import Settings
 from minihci.driver.fake import FakeDriver
 from minihci.models import Task
+from minihci.tasks.executor import TaskType
 from minihci.tasks.recovery import RecoveryReport, recover_orphans
 from tests.helpers import drain, load_task, make_three_step_type, step_rows
 
@@ -76,3 +77,17 @@ def test_orphan_interrupted_mid_rollback_is_rolled_back_not_rerun_forward(sessio
     assert rep.rolled_back == [tid] and rep.resumed == []
     assert calls == [("undo", "b"), ("undo", "a")]
     assert load_task(session_factory, tid).state == "rolled_back"
+
+
+def test_orphan_with_undo_failed_steps_retries_them_on_recovery(session_factory):
+    calls, hits = [], []
+    base = make_three_step_type(calls)
+    tt = TaskType(base.name, "vm", base.steps, on_rolled_back=lambda ctx: hits.append(1))
+    steps = step_rows(("a", "undone"), ("b", "undo_failed"), ("c", "undone"))
+    tid = orphan(session_factory, attempts=1, steps=steps)
+    rep = recover_orphans(session_factory, FakeDriver(), Settings(max_attempts=3), registry={tt.name: tt})
+    assert rep.rolled_back == [tid] and rep.resumed == []
+    assert ("undo", "b") in calls
+    t = load_task(session_factory, tid)
+    assert t.state == "rolled_back" and hits == [1]
+    assert [s["status"] for s in t.steps] == ["undone", "undone", "undone"]

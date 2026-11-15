@@ -3,7 +3,7 @@ from minihci.tasks.executor import Step, TaskType
 
 
 def make_three_step_type(
-    calls: list, fail_at: str | None = None, undo_fails: bool = False, name: str = "test.three"
+    calls: list, fail_at: str | None = None, undo_fails: bool | set[str] = False, name: str = "test.three"
 ) -> TaskType:
     def do(step):
         def f(ctx):
@@ -16,7 +16,7 @@ def make_three_step_type(
     def undo(step):
         def f(ctx):
             calls.append(("undo", step))
-            if undo_fails:
+            if undo_fails is True or (undo_fails and step in undo_fails):
                 raise RuntimeError(f"undo broke {step}")
 
         return f

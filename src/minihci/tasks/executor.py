@@ -134,6 +134,7 @@ def rollback_task(
         if tt is None:
             return _finish(session_factory, task_id, TaskState.FAILED, f"unknown task type: {task.type}")
         ctx = _ctx(task, session_factory, driver, settings)
+        undo_errors: list[str] = []
         for idx in reversed(range(len(task.steps))):
             if task.steps[idx]["status"] not in ("done", "failed", "running", "undo_failed"):
                 continue
@@ -144,13 +145,11 @@ def rollback_task(
             except Exception as e:  # noqa: BLE001
                 logger.error("undo of %s failed: %s", step.name, e)
                 _set_step(session_factory, task_id, idx, status="undo_failed", finished_at=_now(), error=str(e))
-                return _finish(
-                    session_factory,
-                    task_id,
-                    TaskState.FAILED,
-                    f"{reason}; undo of step {step.name} failed: {e}",
-                )
+                undo_errors.append(f"undo of {step.name} failed: {e}")
+                continue
             _set_step(session_factory, task_id, idx, status="undone", finished_at=_now())
+        if undo_errors:
+            return _finish(session_factory, task_id, TaskState.FAILED, "; ".join([reason, *undo_errors]))
         if tt.on_rolled_back is not None:
             try:
                 tt.on_rolled_back(ctx)
