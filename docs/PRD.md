@@ -59,7 +59,7 @@ Six milestones, built in order. Each ends in something demoable, and each requir
 
 ### M1: Hosts and VM lifecycle
 
-- **FR-1.1** Register, list, and remove hosts. Store each host's libvirt URI, total CPU and memory,`docs/superpowers/specs/minihci-prd.md`. Superpowers’ `writing-plans` skill norm and status.
+- **FR-1.1** Register, list, and remove hosts. Store each host's libvirt URI, total CPU and memory, and status.
 - **FR-1.2** Create a VM with name, vCPUs, memory, and disk image on a chosen host. The disk is a qcow2 overlay on shared NFS.
 - **FR-1.3** Start, stop (graceful and forced), reboot, and delete a VM.
 - **FR-1.4** List VMs with their host, state, and resources. Reconcile the database with libvirt's actual state on startup and every 30 seconds.
