@@ -305,3 +305,21 @@ def test_reconcile_never_calls_mutating_driver_methods(session_factory, driver, 
     assert len(report.corrective) == 2 and report.skipped == []
     assert json.dumps(driver._state, sort_keys=True) == before
     assert driver.fail == {"start_domain": 5, "destroy_domain": 5, "shutdown_domain": 5}
+
+
+def test_unknown_domain_state_logged_and_skipped(session_factory, host_id, logbuf):
+    class Paused(FakeDriver):
+        def domain_state(self, uri, name):
+            return "paused" if name == "v1" else super().domain_state(uri, name)
+
+    d = Paused()
+    d.add_host(URI, 8, 16384)
+    v1 = create_vm(session_factory, d, host_id, name="v1")
+    v2 = create_vm(session_factory, d, host_id, name="v2")
+    d.destroy_domain(URI, "v2")
+    report = run(session_factory, d)
+    assert report.skipped == [v1] and actual(session_factory, v1) == "running"
+    assert report.actual_drift == [v2]
+    assert len(report.corrective) == 1  # only v2; nothing for the unknown-state VM
+    ev = [e for e in events(logbuf) if e["event"] == "unknown_domain_state"]
+    assert len(ev) == 1 and ev[0]["vm_id"] == v1 and ev[0]["state"] == "paused"

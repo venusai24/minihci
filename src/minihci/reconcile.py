@@ -1,6 +1,7 @@
 """Reconciler (D-019, D-020): compare the DB with what the hosts report. Never calls a mutating driver method."""
 
 import logging
+import threading
 from dataclasses import dataclass, field
 
 from sqlalchemy import select, text
@@ -94,6 +95,15 @@ def _reconcile_vm(session_factory, driver, host_id: int, uri: str, vm_id: int, r
             report.skipped.append(vm_id)
             return
         state = driver.domain_state(uri, vm.name)  # fresh read, under the lock
+        if state is not None and state not in _DB_STATE:
+            log.warning(
+                "unknown domain state",
+                extra={
+                    "fields": {"event": "unknown_domain_state", "host_id": host_id, "vm_id": vm_id, "state": str(state)}
+                },
+            )
+            report.skipped.append(vm_id)
+            return
         observed = _DB_STATE[state] if state is not None else "missing"
         if observed != vm.actual_state:
             _record_drift(vm, state, observed, host_id, vm_id, report)
@@ -131,3 +141,12 @@ def _record_drift(vm, state, observed: str, host_id: int, vm_id: int, report: Re
         log.warning("actual state drift", extra={"fields": {"event": "actual_drift", **fields}})
         vm.actual_state = observed
         report.actual_drift.append(vm_id)
+
+
+def run_forever(stop: threading.Event, session_factory, driver: HostDriver, settings: Settings) -> None:
+    while not stop.is_set():
+        try:
+            reconcile_once(session_factory, driver, settings)
+        except Exception:
+            log.exception("reconcile pass failed")
+        stop.wait(settings.reconcile_interval_s)

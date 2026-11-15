@@ -9,6 +9,7 @@ from types import FrameType
 from sqlalchemy import Connection, Engine, create_engine, text
 from sqlalchemy.pool import NullPool
 
+from minihci import reconcile
 from minihci.config import Settings
 from minihci.db import make_engine, make_session_factory
 from minihci.driver import build_driver
@@ -47,6 +48,18 @@ def main(argv: list[str] | None = None) -> int:
         driver = build_driver(settings)
         report = recover_orphans(session_factory, driver, settings, REGISTRY)
         logger.info("recovery: resumed=%s rolled_back=%s failed=%s", report.resumed, report.rolled_back, report.failed)
+        try:
+            rep = reconcile.reconcile_once(session_factory, driver, settings)
+            logger.info(
+                "reconcile: missing=%s drift=%s unknown=%s skipped=%s corrective=%s",
+                rep.missing,
+                rep.actual_drift,
+                rep.unknown,
+                rep.skipped,
+                rep.corrective,
+            )
+        except Exception:
+            logger.exception("initial reconcile pass failed")
         stop = threading.Event()
 
         def _stop(signum: int, _frame: FrameType | None) -> None:
@@ -63,9 +76,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             for i in range(settings.worker_threads)
         ]
+        threads.append(
+            threading.Thread(
+                target=reconcile.run_forever, args=(stop, session_factory, driver, settings), name="reconciler"
+            )
+        )
         for th in threads:
             th.start()
-        logger.info("worker started with %d threads", len(threads))
+        logger.info("worker started with %d threads", len(threads) - 1)
         for th in threads:
             th.join()
         return 0
