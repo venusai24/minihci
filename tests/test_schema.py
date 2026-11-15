@@ -94,6 +94,40 @@ def test_absent_vms_may_share_a_name(session_factory):
             s.commit()
 
 
+def _host(name="h1", uri=None, status="ready"):
+    return Host(name=name, libvirt_uri=uri or f"qemu+ssh://{name}/system", status=status)
+
+
+def test_host_removed_and_removing_statuses_accepted(session_factory):
+    with session_factory() as s:
+        s.add_all([_host("a", status="removing"), _host("b", status="removed")])
+        s.commit()
+        s.add(_host("c", status="bogus"))
+        with pytest.raises(IntegrityError, match="ck_hosts_status"):
+            s.commit()
+
+
+def test_removed_hosts_may_share_name_and_uri(session_factory):
+    with session_factory() as s:
+        s.add_all([_host("a", "u1", "removed"), _host("a", "u1", "removed")])
+        s.add(_host("a", "u1", "ready"))  # a live host may reuse them
+        s.commit()
+        assert len(s.scalars(select(Host)).all()) == 3
+
+
+def test_live_host_duplicate_name_or_uri_rejected(session_factory):
+    with session_factory() as s:
+        s.add(_host("a", "u1", "ready"))
+        s.commit()
+        s.add(_host("a", "u2", "removing"))
+        with pytest.raises(IntegrityError, match="uq_hosts_name_live"):
+            s.commit()
+        s.rollback()
+        s.add(_host("b", "u1", "failed"))
+        with pytest.raises(IntegrityError, match="uq_hosts_uri_live"):
+            s.commit()
+
+
 def test_migration_roundtrip(engine):
     cfg = alembic_config(TEST_DB_URL)
     truncate_if_present(engine)
