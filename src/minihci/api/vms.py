@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from minihci.api.deps import get_session
 from minihci.api.idempotency import fingerprint, run_idempotent
-from minihci.models import Host, Vm
+from minihci.models import Host, Task, Vm
 from minihci.paths import resolve_image
 from minihci.tasks.engine import enqueue
 
@@ -71,19 +71,88 @@ def create_vm(
     return JSONResponse({"task_id": task.id, "target_id": task.target_id}, status_code=202, headers=headers)
 
 
+def _vm_out(v: Vm) -> dict[str, Any]:
+    return {
+        "id": v.id,
+        "name": v.name,
+        "host_id": v.host_id,
+        "vcpus": v.vcpus,
+        "mem_mb": v.mem_mb,
+        "image": v.image,
+        "disk_path": v.disk_path,
+        "desired_state": v.desired_state,
+        "actual_state": v.actual_state,
+    }
+
+
 @router.get("/vms")
 def list_vms(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    return [
-        {
-            "id": v.id,
-            "name": v.name,
-            "host_id": v.host_id,
-            "vcpus": v.vcpus,
-            "mem_mb": v.mem_mb,
-            "image": v.image,
-            "disk_path": v.disk_path,
-            "desired_state": v.desired_state,
-            "actual_state": v.actual_state,
-        }
-        for v in session.scalars(select(Vm).order_by(Vm.id))
-    ]
+    return [_vm_out(v) for v in session.scalars(select(Vm).order_by(Vm.id))]
+
+
+@router.get("/vms/{vm_id}")
+def get_vm(vm_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    vm = session.get(Vm, vm_id)
+    if vm is None:
+        raise HTTPException(404, "vm not found")
+    return _vm_out(vm)
+
+
+class StopIn(BaseModel):
+    force: bool = False
+
+
+_DESIRED = {"start": "running", "reboot": "running", "stop": "stopped", "delete": None}
+
+
+def _vm_op(request: Request, vm_id: int, op: str, idempotency_key: str | None, params: dict[str, Any]) -> JSONResponse:
+    def create(s: Session):
+        vm = s.scalars(select(Vm).where(Vm.id == vm_id).with_for_update()).first()
+        if vm is None or vm.desired_state == "absent":
+            raise HTTPException(404, "vm not found")
+        deleting = s.scalars(
+            select(Task.id).where(
+                Task.type == "vm.delete", Task.target_id == vm_id, Task.state.in_(("pending", "running"))
+            )
+        ).first()
+        if deleting is not None:
+            raise HTTPException(409, "vm is being deleted")
+        if _DESIRED[op] is not None:
+            vm.desired_state = _DESIRED[op]
+        return enqueue(s, f"vm.{op}", vm_id, params)
+
+    task, created = run_idempotent(
+        request.app.state.session_factory,
+        idempotency_key,
+        fingerprint({"op": f"vm.{op}", "vm_id": vm_id, **params}),
+        create,
+    )
+    headers = {"Location": f"/tasks/{task.id}"}
+    if not created:
+        headers["Idempotent-Replayed"] = "true"
+    return JSONResponse({"task_id": task.id, "target_id": task.target_id}, status_code=202, headers=headers)
+
+
+@router.post("/vms/{vm_id}/start", status_code=202)
+def start_vm(vm_id: int, request: Request, idempotency_key: Annotated[str | None, Header()] = None):
+    return _vm_op(request, vm_id, "start", idempotency_key, {})
+
+
+@router.post("/vms/{vm_id}/reboot", status_code=202)
+def reboot_vm(vm_id: int, request: Request, idempotency_key: Annotated[str | None, Header()] = None):
+    return _vm_op(request, vm_id, "reboot", idempotency_key, {})
+
+
+@router.post("/vms/{vm_id}/stop", status_code=202)
+def stop_vm(
+    vm_id: int,
+    request: Request,
+    body: StopIn | None = None,
+    idempotency_key: Annotated[str | None, Header()] = None,
+):
+    return _vm_op(request, vm_id, "stop", idempotency_key, {"force": (body or StopIn()).force})
+
+
+@router.delete("/vms/{vm_id}", status_code=202)
+def delete_vm(vm_id: int, request: Request, idempotency_key: Annotated[str | None, Header()] = None):
+    return _vm_op(request, vm_id, "delete", idempotency_key, {})
