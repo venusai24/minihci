@@ -64,3 +64,33 @@ def test_lock_released_after_failed_task(session_factory):
 
 def test_run_once_idle_returns_none(session_factory):
     assert Worker(session_factory, FakeDriver(), Settings(), registry={}).run_once() is None
+
+
+def _claim_one(session_factory, type_="test.noop"):
+    with session_factory() as s:
+        enqueue(s, type_, 1, {})
+        s.commit()
+
+
+def test_infra_error_while_running_requeues_task(session_factory, monkeypatch):
+    _claim_one(session_factory)
+    tt = TaskType("test.noop", "vm", [Step("x", lambda ctx: None)])
+
+    def boom(*a, **k):
+        raise RuntimeError("db connection dropped")
+
+    monkeypatch.setattr("minihci.tasks.worker.run_task", boom)
+    w = Worker(session_factory, FakeDriver(), Settings(max_attempts=3), registry={tt.name: tt})
+    assert w.run_once() == 1
+    t = load_task(session_factory, 1)
+    assert (t.state, t.attempts) == ("pending", 1)
+
+
+def test_infra_error_at_max_attempts_fails_task(session_factory, monkeypatch):
+    _claim_one(session_factory)
+    tt = TaskType("test.noop", "vm", [Step("x", lambda ctx: None)])
+    monkeypatch.setattr("minihci.tasks.worker.run_task", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    w = Worker(session_factory, FakeDriver(), Settings(max_attempts=1), registry={tt.name: tt})
+    assert w.run_once() == 1
+    t = load_task(session_factory, 1)
+    assert t.state == "failed" and "infrastructure error" in t.error

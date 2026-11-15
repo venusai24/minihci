@@ -85,3 +85,13 @@ def test_task_endpoints(client):
     assert len(client.get("/tasks", params={"state": "pending"}).json()) == 1
     assert client.get("/tasks", params={"state": "succeeded"}).json() == []
     assert client.get("/tasks/999").status_code == 404
+
+
+def test_stray_value_error_is_a_500_not_a_400(session_factory):
+    app = create_app(Settings(), session_factory=session_factory)
+
+    @app.get("/boom")
+    def boom():
+        raise ValueError("internal bug")
+
+    assert TestClient(app, raise_server_exceptions=False).get("/boom").status_code == 500

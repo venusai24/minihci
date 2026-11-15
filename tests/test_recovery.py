@@ -66,3 +66,14 @@ def test_non_running_tasks_untouched(session_factory):
     assert rep == RecoveryReport([], [], [])
     assert load_task(session_factory, p).state == "pending"
     assert load_task(session_factory, d).state == "succeeded"
+
+
+def test_orphan_interrupted_mid_rollback_is_rolled_back_not_rerun_forward(session_factory):
+    calls = []
+    tt = make_three_step_type(calls)
+    steps = step_rows(("a", "done"), ("b", "failed"), ("c", "pending"))
+    tid = orphan(session_factory, attempts=1, steps=steps)
+    rep = recover_orphans(session_factory, FakeDriver(), Settings(max_attempts=3), registry={tt.name: tt})
+    assert rep.rolled_back == [tid] and rep.resumed == []
+    assert calls == [("undo", "b"), ("undo", "a")]
+    assert load_task(session_factory, tid).state == "rolled_back"

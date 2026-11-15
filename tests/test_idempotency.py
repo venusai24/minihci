@@ -75,3 +75,29 @@ def test_fingerprint_ignores_key_order():
 def test_key_length_validated(session_factory, key):
     with pytest.raises(ValueError):
         run_idempotent(session_factory, key, FP, creator())
+
+
+@pytest.mark.parametrize("exc", ["http409", "integrity"])
+def test_create_failing_because_a_concurrent_winner_committed_returns_the_replay(session_factory, exc):
+    """Race: another request with the same key commits between our lookup and our create()."""
+    from fastapi import HTTPException
+    from sqlalchemy.exc import IntegrityError
+
+    def losing_create(s):
+        run_idempotent(session_factory, "race2", FP, creator())  # the winner commits first
+        if exc == "http409":
+            raise HTTPException(409, "vm name already exists")
+        raise IntegrityError("insert", {}, Exception("other constraint"))
+
+    task, created = run_idempotent(session_factory, "race2", FP, losing_create)
+    assert not created and count(session_factory) == 1
+
+
+def test_create_failing_without_a_winner_still_raises(session_factory):
+    from fastapi import HTTPException
+
+    def bad(s):
+        raise HTTPException(409, "nope")
+
+    with pytest.raises(HTTPException):
+        run_idempotent(session_factory, "lonely", FP, bad)

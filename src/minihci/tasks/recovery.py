@@ -23,6 +23,10 @@ class RecoveryReport:
     failed: list[int] = field(default_factory=list)
 
 
+def _was_rolling_back(steps: list[dict]) -> bool:
+    return any(st["status"] in ("failed", "undone", "undo_failed") for st in steps)
+
+
 def recover_orphans(
     session_factory: sessionmaker,
     driver: HostDriver,
@@ -32,21 +36,25 @@ def recover_orphans(
     """Resolve tasks left `running` by a dead worker. Call once at process start, before claiming."""
     report = RecoveryReport()
     with session_factory() as s:
-        orphans = [(t.id, t.type, t.attempts) for t in s.scalars(
+        orphans = [(t.id, t.type, t.attempts, t.steps) for t in s.scalars(
             select(Task).where(Task.state == TaskState.RUNNING).order_by(Task.id)
         )]
-    for task_id, type_, attempts in orphans:
+    for task_id, type_, attempts, steps in orphans:
         with task_context(task_id):
             if type_ not in registry:
                 logger.warning("orphan has unknown type %s; failing", type_)
                 _finish(session_factory, task_id, TaskState.FAILED, f"unknown task type: {type_}")
                 report.failed.append(task_id)
-            elif attempts >= settings.max_attempts:
-                logger.warning("orphan at max attempts (%d); rolling back", attempts)
-                state = rollback_task(
-                    task_id, session_factory, driver, settings, registry,
-                    reason=f"max attempts exceeded ({attempts})",
+            elif attempts >= settings.max_attempts or _was_rolling_back(steps):
+                # A task that already failed a step was mid-rollback: finish the rollback, never
+                # run its steps forwards again.
+                reason = (
+                    f"max attempts exceeded ({attempts})"
+                    if attempts >= settings.max_attempts
+                    else "worker died during rollback; rollback resumed"
                 )
+                logger.warning("orphan: %s", reason)
+                state = rollback_task(task_id, session_factory, driver, settings, registry, reason=reason)
                 (report.rolled_back if state == TaskState.ROLLED_BACK else report.failed).append(task_id)
             else:
                 logger.info("orphan requeued for resume (attempt %d)", attempts)

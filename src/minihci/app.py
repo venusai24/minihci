@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import sessionmaker
 
 from minihci.api import hosts, tasks, vms
-from minihci.api.idempotency import IdempotencyConflict
+from minihci.api.idempotency import IdempotencyConflict, InvalidIdempotencyKey
 from minihci.config import Settings
 from minihci.db import make_engine, make_session_factory
 
@@ -23,7 +23,7 @@ def create_app(settings: Settings, session_factory: sessionmaker | None = None) 
     def _conflict(_: Request, exc: IdempotencyConflict) -> JSONResponse:
         return JSONResponse({"detail": str(exc), "task_id": exc.task_id}, status_code=409)
 
-    @app.exception_handler(ValueError)
+    @app.exception_handler(InvalidIdempotencyKey)
     def _bad_value(_: Request, exc: ValueError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=400)
 

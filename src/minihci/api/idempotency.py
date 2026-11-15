@@ -13,6 +13,10 @@ MAX_KEY_LEN = 255
 _KEY_CONSTRAINT = "uq_tasks_idempotency_key"
 
 
+class InvalidIdempotencyKey(ValueError):
+    """The Idempotency-Key header is empty or too long (maps to 400)."""
+
+
 class IdempotencyConflict(Exception):
     """The Idempotency-Key was already used with a different request body."""
 
@@ -45,7 +49,7 @@ def run_idempotent(
 ) -> tuple[Task, bool]:
     """Run `create` at most once per key. Returns (task, created)."""
     if key is not None and not 1 <= len(key) <= MAX_KEY_LEN:
-        raise ValueError(f"Idempotency-Key must be 1-{MAX_KEY_LEN} characters")
+        raise InvalidIdempotencyKey(f"Idempotency-Key must be 1-{MAX_KEY_LEN} characters")
     if key is not None and (hit := _existing(session_factory, key, request_hash)) is not None:
         return hit
     with session_factory() as s:
@@ -55,13 +59,17 @@ def run_idempotent(
             task.request_hash = request_hash
             s.commit()
             return task, True
-        except IntegrityError as e:
+        except Exception as e:
             # Rolling back also discards create()'s side rows (e.g. the VM row).
             s.rollback()
-            constraint = getattr(getattr(e.orig, "diag", None), "constraint_name", None)
-            if key is None or constraint != _KEY_CONSTRAINT:
+            if key is None:
                 raise
-    hit = _existing(session_factory, key, request_hash)
-    if hit is None:  # the winning txn vanished between the conflict and the lookup
-        raise RuntimeError("idempotency conflict but no original task found")
-    return hit
+            # A concurrent request with the same key may have won the race. Whatever create()
+            # tripped over (the key's unique index, the VM name, a 409 check), the right answer
+            # is then the winner's task, not our error.
+            if (hit := _existing(session_factory, key, request_hash)) is not None:
+                return hit
+            constraint = getattr(getattr(getattr(e, "orig", None), "diag", None), "constraint_name", None)
+            if isinstance(e, IntegrityError) and constraint == _KEY_CONSTRAINT:
+                raise RuntimeError("idempotency conflict but no original task found") from e
+            raise
