@@ -147,3 +147,35 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   locally; on hosts where the API cannot see NFS, the check is lexical and the worker re-check is
   the backstop. A real-host driver should resolve on the host too (Q13 note).
 - **How to undo:** Drop the validator; images are trusted again.
+
+## D-015 Removed hosts are soft-deleted (status `removed`), not row-deleted
+- **Context:** FR-1.1 needs host removal. `vms.host_id` is a FK to `hosts`, and D-010/D-012 keep
+  `absent` VM rows for audit, so deleting the host row would break the FK or the audit trail.
+  `hosts.name`/`libvirt_uri` are plain UNIQUE, so a soft-deleted host would block re-registering
+  the same machine (the same trap D-012 fixed for VMs).
+- **Decision:** Revision `0003` adds `removing` and `removed` to `ck_hosts_status` and replaces the
+  two plain unique constraints with partial unique indexes `WHERE status <> 'removed'`. `DELETE
+  /hosts/{id}` sets `removing` and enqueues `host.remove`, whose last step sets `removed`. Removal
+  makes no driver calls: it only stops MiniHCI managing the host, so an unreachable host can be
+  removed. `GET /hosts` and the register conflict check skip `removed` rows; `POST /vms` already
+  requires `ready`.
+- **Consequences:** The row stays for audit and old VM rows keep a valid FK. Q10 will rewrite
+  `ck_hosts_status` again and must keep `removing`/`removed`. Heartbeat/placement must skip them.
+- **How to undo:** Downgrade 0003. It fails if any `removing`/`removed` rows exist; delete those
+  (and their `absent` VMs) first.
+
+## D-016 Removing a host with VMs: 409 up front, re-checked in the task
+- **Context:** FR-1.1 / Q02 allow either a 409 or a task failure when VMs are placed on the host.
+- **Decision:** Both, layered. The API counts live VMs (`desired_state <> 'absent'`) inside the
+  idempotent `create` transaction while holding `SELECT ... FOR UPDATE` on the host row, and
+  returns 409 listing the VM names (no task row). `POST /vms` takes `FOR SHARE` on the host row,
+  so a create and a remove on one host serialize; whichever commits second sees the other's effect
+  (status `removing`, or the new VM). The `host.remove` step `check_empty` re-counts as a
+  backstop; if it finds VMs the task rolls back (`rolled_back`, error names the VMs) and
+  `on_rolled_back` restores the previous status from `params.prev_status`. DELETE on a
+  `registering` or `removing` host → 409; on a missing or `removed` host → 404. An idempotent
+  replay returns the original task (D-005), even after the host is removed.
+- **Consequences:** The common case gets an immediate, clear error; the rare race ends as a
+  rolled-back task, never a host removed with VMs still on it. VMs whose rollback failed still
+  count as live, so they block removal until cleaned up.
+- **How to undo:** Drop the API check; the task check alone still keeps removal correct.
