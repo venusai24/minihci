@@ -238,13 +238,6 @@ def test_absent_vms_and_non_ready_hosts_ignored(session_factory, driver, host_id
     assert actual(session_factory, v2) == "running"
 
 
-def test_no_tasks_enqueued(session_factory, driver, host_id):
-    create_vm(session_factory, driver, host_id, running=False, desired="running")
-    run(session_factory, driver)
-    with session_factory() as s:
-        assert s.scalars(text("select id from tasks")).all() == []
-
-
 def test_json_formatter_merges_fields():
     rec = logging.LogRecord("minihci.x", logging.INFO, "f", 1, "hello", None, None)
     rec.fields = {"event": "e", "vm_id": 3}
@@ -257,3 +250,58 @@ def test_json_formatter_fields_cannot_clobber_core_keys():
     rec.fields = {"msg": "evil", "level": "X"}
     d = json.loads(JsonFormatter().format(rec))
     assert d["msg"] == "hello" and d["level"] == "INFO"
+
+
+def tasks_of(session_factory):
+    with session_factory() as s:
+        return [(t.type, t.target_id, t.params) for t in s.query(Task).order_by(Task.id)]
+
+
+def test_corrective_start_queue_acceptance(session_factory, driver, host_id, logbuf):
+    vm_id = create_vm(session_factory, driver, host_id, running=False, desired="running")
+    report = run(session_factory, driver)
+    assert len(report.corrective) == 1
+    assert tasks_of(session_factory) == [("vm.start", vm_id, {})]
+    ev = [e for e in events(logbuf) if e["event"] == "corrective_task"]
+    assert len(ev) == 1 and ev[0]["task_id"] == report.corrective[0] and ev[0]["vm_id"] == vm_id
+    drain(session_factory, driver)
+    assert actual(session_factory, vm_id) == "running"
+    again = run(session_factory, driver)
+    assert (again.corrective, again.missing, again.actual_drift, again.skipped) == ([], [], [], [])
+
+
+def test_corrective_stop_not_forced(session_factory, driver, host_id):
+    vm_id = create_vm(session_factory, driver, host_id, running=True, desired="stopped")
+    report = run(session_factory, driver)
+    assert len(report.corrective) == 1
+    assert tasks_of(session_factory) == [("vm.stop", vm_id, {"force": False})]
+    drain(session_factory, driver)
+    assert actual(session_factory, vm_id) == "stopped"
+
+
+def test_no_duplicate_corrective_before_drain(session_factory, driver, host_id):
+    create_vm(session_factory, driver, host_id, running=False, desired="running")
+    run(session_factory, driver)
+    second = run(session_factory, driver)
+    assert second.corrective == [] and len(tasks_of(session_factory)) == 1
+
+
+def test_missing_vm_gets_no_task(session_factory, driver, host_id):
+    vm_id = create_vm(session_factory, driver, host_id)
+    driver.destroy_domain(URI, "web1")
+    driver.undefine_domain(URI, "web1")
+    report = run(session_factory, driver)
+    assert report.missing == [vm_id] and report.corrective == []
+    assert tasks_of(session_factory) == []
+    assert run(session_factory, driver).corrective == []
+
+
+def test_reconcile_never_calls_mutating_driver_methods(session_factory, driver, host_id):
+    create_vm(session_factory, driver, host_id, running=False, desired="running")
+    create_vm(session_factory, driver, host_id, name="web2", running=True, desired="stopped")
+    driver.fail.update({"start_domain": 5, "destroy_domain": 5, "shutdown_domain": 5})
+    before = json.dumps(driver._state, sort_keys=True)
+    report = run(session_factory, driver)
+    assert len(report.corrective) == 2 and report.skipped == []
+    assert json.dumps(driver._state, sort_keys=True) == before
+    assert driver.fail == {"start_domain": 5, "destroy_domain": 5, "shutdown_domain": 5}

@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from minihci.config import Settings
 from minihci.driver.base import DomainState, DriverError, HostDriver, HostUnreachable
+from minihci.logging import task_context
 from minihci.models import Host, Task, Vm
+from minihci.tasks.engine import enqueue
 from minihci.tasks.locks import LOCK_NAMESPACE
 
 log = logging.getLogger("minihci.reconcile")
@@ -93,16 +95,39 @@ def _reconcile_vm(session_factory, driver, host_id: int, uri: str, vm_id: int, r
             return
         state = driver.domain_state(uri, vm.name)  # fresh read, under the lock
         observed = _DB_STATE[state] if state is not None else "missing"
-        if observed == vm.actual_state:
-            return
-        fields = {"host_id": host_id, "vm_id": vm_id, "expected": vm.actual_state, "observed": observed}
-        if state is None:
-            fields["observed"] = None
-            fields["expected"] = vm.desired_state if vm.actual_state == "pending" else vm.actual_state
-            log.warning("vm missing", extra={"fields": {"event": "vm_missing", **fields}})
-            vm.actual_state = "missing"
-            report.missing.append(vm_id)
-        else:
-            log.warning("actual state drift", extra={"fields": {"event": "actual_drift", **fields}})
-            vm.actual_state = observed
-            report.actual_drift.append(vm_id)
+        if observed != vm.actual_state:
+            _record_drift(vm, state, observed, host_id, vm_id, report)
+        if state is not None and observed != vm.desired_state:
+            # D-019: never act directly; enqueue in this txn, under the VM lock, so passes cannot duplicate it
+            ttype, params = ("vm.start", {}) if vm.desired_state == "running" else ("vm.stop", {"force": False})
+            task = enqueue(s, ttype, vm_id, params)
+            report.corrective.append(task.id)
+            with task_context(task.id):
+                log.warning(
+                    "corrective task enqueued",
+                    extra={
+                        "fields": {
+                            "event": "corrective_task",
+                            "task_id": task.id,
+                            "task_type": ttype,
+                            "host_id": host_id,
+                            "vm_id": vm_id,
+                            "desired": vm.desired_state,
+                            "observed": observed,
+                        }
+                    },
+                )
+
+
+def _record_drift(vm, state, observed: str, host_id: int, vm_id: int, report: ReconcileReport) -> None:
+    fields = {"host_id": host_id, "vm_id": vm_id, "expected": vm.actual_state, "observed": observed}
+    if state is None:
+        fields["observed"] = None
+        fields["expected"] = vm.desired_state if vm.actual_state == "pending" else vm.actual_state
+        log.warning("vm missing", extra={"fields": {"event": "vm_missing", **fields}})
+        vm.actual_state = "missing"
+        report.missing.append(vm_id)
+    else:
+        log.warning("actual state drift", extra={"fields": {"event": "actual_drift", **fields}})
+        vm.actual_state = observed
+        report.actual_drift.append(vm_id)
