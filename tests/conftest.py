@@ -24,5 +24,5 @@ def engine():
 @pytest.fixture
 def session_factory(engine):
     with engine.begin() as c:
-        c.execute(text("TRUNCATE tasks, vms, hosts RESTART IDENTITY CASCADE"))
+        c.execute(text("TRUNCATE tasks, vms, hosts, scheduler_config RESTART IDENTITY CASCADE"))
     return make_session_factory(engine)

@@ -69,3 +69,15 @@ class Task(Base):
     started_at: Mapped[datetime | None]
     finished_at: Mapped[datetime | None]
     error: Mapped[str | None]
+
+
+class SchedulerConfig(Base):
+    __tablename__ = "scheduler_config"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_scheduler_config_single_row"),
+        CheckConstraint("cpu_headroom_pct between 1 and 100", name="ck_scheduler_config_headroom"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    cpu_headroom_pct: Mapped[int] = mapped_column(default=80, server_default="80")
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
