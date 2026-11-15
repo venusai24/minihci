@@ -12,7 +12,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest", "pytest-timeout", "httpx"]
+dev = [
+    "pytest",
+    "pytest-timeout",
+    "httpx",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -24,3 +28,15 @@ packages = ["src/minihci"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "slow: subprocess/crash tests (excluded by CHECK_FAST=1)",
+    "real_hosts: needs real libvirt hosts (skipped unless MINIHCI_REAL_HOSTS is set)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency-injection idiom (x = Depends(...)) is intentional.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Header", "fastapi.Query"]
