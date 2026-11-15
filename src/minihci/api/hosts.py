@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -11,6 +12,7 @@ from minihci.api.idempotency import fingerprint, run_idempotent
 from minihci.models import Host, Vm
 from minihci.tasks.engine import enqueue
 
+log = logging.getLogger("minihci.api")
 router = APIRouter()
 
 
@@ -44,6 +46,7 @@ def register_host(
     headers = {"Location": f"/tasks/{task.id}"}
     if not created:
         headers["Idempotent-Replayed"] = "true"
+    log.info("task_enqueued", extra={"fields": {"task_id": task.id}})
     return JSONResponse({"task_id": task.id, "target_id": task.target_id}, status_code=202, headers=headers)
 
 
@@ -78,6 +81,7 @@ def remove_host(
     headers = {"Location": f"/tasks/{task.id}"}
     if not created:
         headers["Idempotent-Replayed"] = "true"
+    log.info("task_enqueued", extra={"fields": {"task_id": task.id}})
     return JSONResponse({"task_id": task.id, "target_id": task.target_id}, status_code=202, headers=headers)
 
 

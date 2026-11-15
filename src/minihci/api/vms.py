@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -13,6 +14,7 @@ from minihci.models import Host, Task, Vm
 from minihci.paths import resolve_image
 from minihci.tasks.engine import enqueue
 
+log = logging.getLogger("minihci.api")
 router = APIRouter()
 
 
@@ -68,6 +70,7 @@ def create_vm(
     headers = {"Location": f"/tasks/{task.id}"}
     if not created:
         headers["Idempotent-Replayed"] = "true"
+    log.info("task_enqueued", extra={"fields": {"task_id": task.id}})
     return JSONResponse({"task_id": task.id, "target_id": task.target_id}, status_code=202, headers=headers)
 
 
@@ -130,6 +133,7 @@ def _vm_op(request: Request, vm_id: int, op: str, idempotency_key: str | None, p
     headers = {"Location": f"/tasks/{task.id}"}
     if not created:
         headers["Idempotent-Replayed"] = "true"
+    log.info("task_enqueued", extra={"fields": {"task_id": task.id}})
     return JSONResponse({"task_id": task.id, "target_id": task.target_id}, status_code=202, headers=headers)
 
 

@@ -80,7 +80,9 @@ def run(session_factory, driver):
 
 
 def test_m1_acceptance_vm_deleted_outside_is_detected(session_factory, driver, host_id, logbuf):
-    client = TestClient(create_app(Settings(storage_root="/srv/test-images"), session_factory=session_factory))
+    client = TestClient(
+        create_app(Settings(storage_root="/srv/test-images"), session_factory=session_factory, log_stream=logbuf)
+    )
     r = client.post(
         "/vms",
         json={"name": "web1", "host_id": host_id, "vcpus": 1, "mem_mb": 512, "image": "/srv/minihci/base/a.qcow2"},

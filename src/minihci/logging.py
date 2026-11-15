@@ -22,7 +22,8 @@ class JsonFormatter(logging.Formatter):
         fields = getattr(record, "fields", None)
         if isinstance(fields, dict):
             for k, v in fields.items():
-                payload.setdefault(k, v)  # never clobber core keys
+                if payload.get(k) is None:  # never clobber set core keys
+                    payload[k] = v
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, default=str)
