@@ -28,3 +28,16 @@ def step_rows(*pairs: tuple[str, str]) -> list[dict]:
 def load_task(session_factory, task_id: int) -> Task:
     with session_factory() as s:
         return s.get(Task, task_id)
+
+
+from minihci.config import Settings
+from minihci.tasks.registry import REGISTRY
+from minihci.tasks.worker import Worker
+
+
+def drain(session_factory, driver, registry=None, settings=None) -> list[int]:
+    w = Worker(session_factory, driver, settings or Settings(), registry=REGISTRY if registry is None else registry)
+    done = []
+    while (tid := w.run_once()) is not None:
+        done.append(tid)
+    return done
