@@ -103,3 +103,103 @@ def test_stray_value_error_is_a_500_not_a_400(session_factory):
         raise ValueError("internal bug")
 
     assert TestClient(app, raise_server_exceptions=False).get("/boom").status_code == 500
+
+
+# --- DELETE /hosts/{id} (Q02.3) ---
+
+
+def _ready(session_factory, name="a", uri=URI):
+    from tests.helpers import add_ready_host
+
+    drv = FakeDriver()
+    return add_ready_host(session_factory, drv, name=name, uri=uri), drv
+
+
+def test_delete_host_202_then_gone_from_listing(client, session_factory):
+    hid, drv = _ready(session_factory)
+    r = client.delete(f"/hosts/{hid}")
+    assert r.status_code == 202
+    assert r.headers["location"] == f"/tasks/{r.json()['task_id']}"
+    assert [h["status"] for h in client.get("/hosts").json()] == ["removing"]
+    drain(session_factory, drv)
+    assert client.get(f"/tasks/{r.json()['task_id']}").json()["state"] == "succeeded"
+    assert client.get("/hosts").json() == []
+
+
+def test_delete_host_with_live_vm_is_409_and_no_task(client, session_factory):
+    from minihci.models import Task, Vm
+
+    hid, _ = _ready(session_factory)
+    with session_factory() as s:
+        s.add(
+            Vm(
+                name="web1",
+                host_id=hid,
+                vcpus=1,
+                mem_mb=512,
+                image="i",
+                disk_path="/d",
+                desired_state="running",
+                actual_state="running",
+            )
+        )
+        s.commit()
+    r = client.delete(f"/hosts/{hid}")
+    assert r.status_code == 409 and "web1" in r.text
+    with session_factory() as s:
+        assert s.query(Task).count() == 0
+    assert client.get("/hosts").json()[0]["status"] == "ready"
+
+
+def test_delete_host_replay_same_key(client, session_factory):
+    hid, drv = _ready(session_factory)
+    h = {"Idempotency-Key": "rm-1"}
+    first = client.delete(f"/hosts/{hid}", headers=h)
+    second = client.delete(f"/hosts/{hid}", headers=h)
+    assert second.status_code == 202
+    assert second.json()["task_id"] == first.json()["task_id"]
+    assert second.headers["idempotent-replayed"] == "true"
+    drain(session_factory, drv)
+    third = client.delete(f"/hosts/{hid}", headers=h)  # even after removal
+    assert third.json()["task_id"] == first.json()["task_id"]
+
+
+def test_delete_host_same_key_other_host_conflicts(client, session_factory):
+    a, _ = _ready(session_factory)
+    b, _ = _ready(session_factory, name="b", uri="qemu+ssh://b/system")
+    h = {"Idempotency-Key": "rm-1"}
+    assert client.delete(f"/hosts/{a}", headers=h).status_code == 202
+    assert client.delete(f"/hosts/{b}", headers=h).status_code == 409
+
+
+def test_delete_unknown_or_removed_host_is_404(client, session_factory):
+    assert client.delete("/hosts/9999").status_code == 404
+    hid, drv = _ready(session_factory)
+    client.delete(f"/hosts/{hid}")
+    drain(session_factory, drv)
+    assert client.delete(f"/hosts/{hid}").status_code == 404
+
+
+def test_delete_host_already_removing_is_409(client, session_factory):
+    hid, _ = _ready(session_factory)
+    assert client.delete(f"/hosts/{hid}").status_code == 202
+    assert client.delete(f"/hosts/{hid}").status_code == 409
+
+
+def test_create_vm_on_removing_host_is_409(client, session_factory):
+    hid, _ = _ready(session_factory)
+    client.delete(f"/hosts/{hid}")
+    r = client.post(
+        "/vms",
+        json={"name": "w", "host_id": hid, "vcpus": 1, "mem_mb": 512, "image": "/srv/minihci/base/alpine.qcow2"},
+    )
+    assert r.status_code == 409
+
+
+def test_reregister_same_name_and_uri_after_removal(client, session_factory):
+    hid, drv = _ready(session_factory)
+    client.delete(f"/hosts/{hid}")
+    drain(session_factory, drv)
+    r = client.post("/hosts", json={"name": "a", "libvirt_uri": URI})
+    assert r.status_code == 202
+    assert [h["status"] for h in client.get("/hosts").json()] == ["registering"]

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from minihci.api.deps import get_session
 from minihci.api.idempotency import fingerprint, run_idempotent
-from minihci.models import Host
+from minihci.models import Host, Vm
 from minihci.tasks.engine import enqueue
 
 router = APIRouter()
@@ -26,7 +26,11 @@ def register_host(
     idempotency_key: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     def create(s: Session):
-        taken = s.scalars(select(Host).where(or_(Host.name == body.name, Host.libvirt_uri == body.libvirt_uri))).first()
+        taken = s.scalars(
+            select(Host).where(
+                Host.status != "removed", or_(Host.name == body.name, Host.libvirt_uri == body.libvirt_uri)
+            )
+        ).first()
         if taken is not None:
             raise HTTPException(409, "host name or libvirt_uri already registered")
         host = Host(name=body.name, libvirt_uri=body.libvirt_uri, status="registering")
@@ -36,6 +40,40 @@ def register_host(
 
     task, created = run_idempotent(
         request.app.state.session_factory, idempotency_key, fingerprint(body.model_dump()), create
+    )
+    headers = {"Location": f"/tasks/{task.id}"}
+    if not created:
+        headers["Idempotent-Replayed"] = "true"
+    return JSONResponse({"task_id": task.id, "target_id": task.target_id}, status_code=202, headers=headers)
+
+
+@router.delete("/hosts/{host_id}", status_code=202)
+def remove_host(
+    host_id: int,
+    request: Request,
+    idempotency_key: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    def create(s: Session):
+        # FOR UPDATE serializes with VM creation, which takes a shared row lock on the host.
+        host = s.scalars(select(Host).where(Host.id == host_id).with_for_update()).first()
+        if host is None or host.status == "removed":
+            raise HTTPException(404, "host not found")
+        if host.status in ("registering", "removing"):
+            raise HTTPException(409, f"host is busy (status={host.status})")
+        names = list(
+            s.scalars(select(Vm.name).where(Vm.host_id == host_id, Vm.desired_state != "absent").order_by(Vm.name))
+        )
+        if names:
+            raise HTTPException(409, f"host has {len(names)} VM(s): {', '.join(names)}")
+        prev = host.status
+        host.status = "removing"
+        return enqueue(s, "host.remove", host.id, {"prev_status": prev})
+
+    task, created = run_idempotent(
+        request.app.state.session_factory,
+        idempotency_key,
+        fingerprint({"op": "host.remove", "host_id": host_id}),
+        create,
     )
     headers = {"Location": f"/tasks/{task.id}"}
     if not created:
@@ -54,5 +92,5 @@ def list_hosts(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
             "cpu_total": h.cpu_total,
             "mem_total_mb": h.mem_total_mb,
         }
-        for h in session.scalars(select(Host).order_by(Host.id))
+        for h in session.scalars(select(Host).where(Host.status != "removed").order_by(Host.id))
     ]

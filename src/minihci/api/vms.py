@@ -38,7 +38,7 @@ def create_vm(
 
     def create(s: Session):
         # Runs only on an idempotency-key miss, so a replay never trips the name check below.
-        host = s.get(Host, body.host_id)
+        host = s.scalars(select(Host).where(Host.id == body.host_id).with_for_update(read=True)).first()
         if host is None:
             raise HTTPException(404, "host not found")
         if host.status != "ready":
