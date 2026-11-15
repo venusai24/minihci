@@ -141,8 +141,32 @@ class FakeDriver:
             if d["state"] == DomainState.RUNNING.value:
                 raise DriverError(f"domain already running: {name}")
             d["state"] = DomainState.RUNNING.value
+            d["boot_count"] = d.get("boot_count", 0) + 1
 
         self._call("start_domain", fn)
+
+    def shutdown_domain(self, uri: str, name: str) -> None:
+        def fn(state: dict[str, Any]) -> None:
+            d = self._domain(state, uri, name)
+            if d["state"] != DomainState.RUNNING.value:
+                raise DriverError(f"domain not running: {name}")
+            d["state"] = DomainState.SHUT_OFF.value
+
+        self._call("shutdown_domain", fn)
+
+    def reboot_domain(self, uri: str, name: str) -> None:
+        def fn(state: dict[str, Any]) -> None:
+            d = self._domain(state, uri, name)
+            if d["state"] != DomainState.RUNNING.value:
+                raise DriverError(f"domain not running: {name}")
+            d["boot_count"] = d.get("boot_count", 0) + 1
+
+        self._call("reboot_domain", fn)
+
+    def boot_count(self, uri: str, name: str) -> int:
+        """Test helper (not part of the protocol): how often the domain has booted."""
+        with self._locked() as state:
+            return self._domain(state, uri, name).get("boot_count", 0)
 
     def destroy_domain(self, uri: str, name: str) -> None:
         def fn(state: dict[str, Any]) -> None:

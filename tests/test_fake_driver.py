@@ -113,3 +113,48 @@ def test_build_driver(tmp_path):
     assert isinstance(d, FakeDriver) and d.fail == {"start_domain": 1}
     with pytest.raises(NotImplementedError):
         build_driver(Settings(driver="libvirt"))
+
+
+def test_shutdown_domain(drv):
+    drv.define_domain(URI, SPEC)
+    drv.start_domain(URI, "vm1")
+    drv.shutdown_domain(URI, "vm1")
+    assert drv.domain_state(URI, "vm1") == DomainState.SHUT_OFF
+
+
+def test_shutdown_domain_errors(drv):
+    with pytest.raises(DomainNotFound):
+        drv.shutdown_domain(URI, "nope")
+    drv.define_domain(URI, SPEC)
+    with pytest.raises(DriverError):
+        drv.shutdown_domain(URI, "vm1")
+
+
+def test_reboot_domain_errors(drv):
+    with pytest.raises(DomainNotFound):
+        drv.reboot_domain(URI, "nope")
+    drv.define_domain(URI, SPEC)
+    with pytest.raises(DriverError):
+        drv.reboot_domain(URI, "vm1")
+
+
+def test_boot_count_increments_on_start_and_reboot(drv):
+    drv.define_domain(URI, SPEC)
+    assert drv.boot_count(URI, "vm1") == 0
+    drv.start_domain(URI, "vm1")
+    assert drv.boot_count(URI, "vm1") == 1
+    drv.reboot_domain(URI, "vm1")
+    assert drv.boot_count(URI, "vm1") == 2
+    assert drv.domain_state(URI, "vm1") == DomainState.RUNNING
+
+
+def test_shutdown_and_reboot_use_call_hooks(drv):
+    drv.define_domain(URI, SPEC)
+    drv.start_domain(URI, "vm1")
+    drv.fail["shutdown_domain"] = 1
+    drv.fail["reboot_domain"] = 1
+    with pytest.raises(DriverError, match="injected"):
+        drv.shutdown_domain(URI, "vm1")
+    with pytest.raises(DriverError, match="injected"):
+        drv.reboot_domain(URI, "vm1")
+    assert drv.domain_state(URI, "vm1") == DomainState.RUNNING
