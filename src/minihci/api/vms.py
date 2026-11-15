@@ -43,7 +43,7 @@ def create_vm(
             raise HTTPException(404, "host not found")
         if host.status != "ready":
             raise HTTPException(409, f"host is not ready (status={host.status})")
-        if s.scalars(select(Vm).where(Vm.name == body.name)).first() is not None:
+        if s.scalars(select(Vm).where(Vm.name == body.name, Vm.desired_state != "absent")).first() is not None:
             raise HTTPException(409, "vm name already exists")
         vm = Vm(
             name=body.name,

@@ -28,10 +28,11 @@ class Vm(Base):
     __table_args__ = (
         CheckConstraint("desired_state in ('running','stopped','absent')", name="ck_vms_desired_state"),
         CheckConstraint("actual_state in ('pending','running','stopped','absent','error')", name="ck_vms_actual_state"),
+        Index("uq_vms_name_live", "name", unique=True, postgresql_where=text("desired_state <> 'absent'")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
+    name: Mapped[str]
     host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id"))
     vcpus: Mapped[int]
     mem_mb: Mapped[int]

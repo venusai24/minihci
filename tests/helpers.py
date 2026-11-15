@@ -68,6 +68,7 @@ def assert_db_matches_driver(session_factory, driver) -> None:
         hosts = {h.id: h for h in s.scalars(select(Host))}
         vms = s.scalars(select(Vm)).all()
     tracked = set()
+    live_names = {(hosts[v.host_id].libvirt_uri, v.name): v.disk_path for v in vms if v.actual_state != "absent"}
     for vm in vms:
         uri = hosts[vm.host_id].libvirt_uri
         state = driver.domain_state(uri, vm.name)
@@ -76,6 +77,10 @@ def assert_db_matches_driver(session_factory, driver) -> None:
             assert driver.disk_exists(vm.disk_path), f"{vm.name}: disk missing"
             tracked.add((uri, vm.name))
         elif vm.actual_state == "absent":
+            if (uri, vm.name) in live_names:  # name reused by a live VM; its row covers the domain state
+                if vm.disk_path != live_names[(uri, vm.name)]:
+                    assert not driver.disk_exists(vm.disk_path), f"{vm.name}: leaked disk"
+                continue
             assert state is None, f"{vm.name}: db absent, driver {state}"
             assert not driver.disk_exists(vm.disk_path), f"{vm.name}: leaked disk"
         else:

@@ -82,6 +82,20 @@ def test_start_failure_rolls_back_everything(client, session_factory, driver, ho
     assert_db_matches_driver(session_factory, driver)
 
 
+def test_name_reusable_after_rollback(client, session_factory, driver, host_id):
+    driver.fail["start_domain"] = 1
+    first = client.post("/vms", json=body(host_id)).json()["task_id"]
+    drain(session_factory, driver)
+    assert load_task(session_factory, first).state == "rolled_back"
+    r = client.post("/vms", json=body(host_id))
+    assert r.status_code == 202
+    drain(session_factory, driver)
+    assert load_task(session_factory, r.json()["task_id"]).state == "succeeded"
+    assert driver.domain_state(URI, "web1") == DomainState.RUNNING
+    assert client.post("/vms", json=body(host_id)).status_code == 409
+    assert_db_matches_driver(session_factory, driver)
+
+
 @pytest.mark.parametrize(
     "override",
     [

@@ -4,7 +4,7 @@ from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 
 from minihci.models import Host, Task, Vm
-from tests.dbutil import TEST_DB_URL, alembic_config
+from tests.dbutil import TEST_DB_URL, alembic_config, truncate_if_present
 
 
 def make_host(s, name="h1", status="ready"):
@@ -66,20 +66,37 @@ def test_task_state_check_rejects_unknown(session_factory):
             s.commit()
 
 
+def _vm(h, name="web1", path="/srv/web1.qcow2", **kw):
+    return Vm(name=name, host_id=h.id, vcpus=1, mem_mb=512, image="/img/a.qcow2", disk_path=path, **kw)
+
+
 def test_vm_defaults_and_unique_name(session_factory):
     with session_factory() as s:
         h = make_host(s)
-        s.add(Vm(name="web1", host_id=h.id, vcpus=1, mem_mb=512, image="/img/a.qcow2", disk_path="/srv/web1.qcow2"))
+        s.add(_vm(h))
         s.commit()
         vm = s.scalars(select(Vm)).one()
         assert (vm.desired_state, vm.actual_state) == ("running", "pending")
-        s.add(Vm(name="web1", host_id=h.id, vcpus=1, mem_mb=512, image="/img/a.qcow2", disk_path="/srv/x.qcow2"))
-        with pytest.raises(IntegrityError):
+        s.add(_vm(h, path="/srv/x.qcow2"))
+        with pytest.raises(IntegrityError, match="uq_vms_name_live"):
+            s.commit()
+
+
+def test_absent_vms_may_share_a_name(session_factory):
+    with session_factory() as s:
+        h = make_host(s)
+        s.add_all([_vm(h, desired_state="absent"), _vm(h, desired_state="absent")])
+        s.add(_vm(h))  # a live VM may reuse a name held only by absent rows
+        s.commit()
+        assert len(s.scalars(select(Vm)).all()) == 3
+        s.add(_vm(h, desired_state="stopped"))
+        with pytest.raises(IntegrityError, match="uq_vms_name_live"):
             s.commit()
 
 
 def test_migration_roundtrip(engine):
     cfg = alembic_config(TEST_DB_URL)
+    truncate_if_present(engine)
     command.downgrade(cfg, "base")
     assert "tasks" not in inspect(engine).get_table_names()
     command.upgrade(cfg, "head")

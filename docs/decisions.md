@@ -119,7 +119,9 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   A VM whose rollback *failed* keeps `desired_state` non-absent (on_rolled_back does not run), so
   its name, and the derived disk path `{storage_root}/{name}.qcow2`, stay reserved until it is
   cleaned up. Q03's delete frees a name the same way (sets `absent`). Lookups by name must filter live rows.
-- **How to undo:** Downgrade 0002 (fails if duplicate names exist; delete absent rows first).
+- **How to undo:** Downgrade 0002. It does not modify data: if two rows share a name, restoring
+  `vms_name_key` fails with an IntegrityError and the transaction rolls back. Delete the duplicate
+  `absent` rows first (and their `task_steps`/`tasks` if FKs require it), then re-run the downgrade.
 
 ## D-013 Rollback runs every undo, even after one fails
 - **Context:** D-007 stops at the first failing undo, leaving earlier steps' effects in place.
