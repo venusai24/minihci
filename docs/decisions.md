@@ -214,3 +214,40 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   reconciler must skip VMs that have a pending or running task.
 - **How to undo:** Set `absent` in the API instead, and give each VM its own disk path (for
   example `{name}-{id}.qcow2`) so names and paths stop being linked.
+
+## D-019 Reconciler: per-VM try-lock, fresh driver read, corrective tasks only
+- **Context:** FR-1.4 and NFR-1 want the DB and libvirt reconciled on startup and every 30 s, with
+  every drift logged and fixed. The reconciler must not race a task that is changing the same VM
+  (D-003, D-018), and the constitution says only tasks change hosts.
+- **Decision:** `reconcile.reconcile_once(session_factory, driver, settings)` runs in the worker
+  process: one pass after `recover_orphans`, then a timer thread every `Settings.reconcile_interval_s`
+  (default 30). For each host with status `ready` it calls `list_domains(uri)`. On HostUnreachable it
+  logs and skips the host (host health is Q10's job). A domain with no live VM row on that host is
+  logged as `unknown_domain` and never touched. Each VM (desired not `absent`, on that host) is handled
+  in one short transaction: `pg_try_advisory_xact_lock(1, vm_id)` (same key as `target_lock`; busy →
+  skip), `SELECT vm FOR UPDATE` (serializes with the API), skip if any task for the VM is
+  `pending|running`, then re-read `domain_state` **while holding the lock** and decide. Domain gone →
+  `actual_state='missing'` (D-020). Driver state differs from `actual_state` → copy the driver state
+  in and log `actual_drift`. Driver state differs from `desired_state` → enqueue `vm.start` or
+  `vm.stop {force: false}` and log `corrective_task`. The reconciler never calls a mutating driver
+  method. Drift log lines are JSON with `event`, `vm_id`, `host_id`, `expected`, `observed`
+  (JsonFormatter gains an optional `fields` extra).
+- **Consequences:** No double work: a VM with a queued or running task is left to that task, and the
+  next pass checks it again. A corrective task that keeps failing (for example a graceful-stop
+  timeout) is re-enqueued every interval. That shows in the task list and does no harm. VMs on hosts
+  that are not `ready` are not checked.
+- **How to undo:** Drop the try-lock and rely only on the pending/running task check. That is
+  smaller, but it races a task that finishes between the driver read and the DB write.
+
+## D-020 A VM deleted outside MiniHCI becomes `missing` and is not re-created automatically
+- **Context:** The PRD's M1 acceptance is that a VM deleted outside MiniHCI is "detected by
+  reconciliation". NFR-1 says drift is fixed, but re-creating a domain someone removed on purpose
+  (maybe with its disk) could bring back a VM the operator wanted gone.
+- **Decision:** New `actual_state` value `missing` (revision 0004, added to `ck_vms_actual_state`).
+  The reconciler sets it, logs `vm_missing` and enqueues no task. The operator decides: `DELETE
+  /vms/{id}` (vm.delete skips steps already done, D-018) or a later re-create. A `missing` row keeps
+  its name reserved (desired is not `absent`, D-012).
+- **Consequences:** Detection is automatic; repair is a human decision. `GET /vms` shows `missing`.
+  If the domain comes back, the next pass sees it and copies its real state in.
+- **How to undo:** Enqueue `vm.create` for missing VMs whose disk still exists. Its steps check state
+  first, so it would only define and start the domain.
