@@ -179,3 +179,38 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   rolled-back task, never a host removed with VMs still on it. VMs whose rollback failed still
   count as live, so they block removal until cleaned up.
 - **How to undo:** Drop the API check; the task check alone still keeps removal correct.
+
+## D-017 VM power operations: desired state set by the API, no-op when already there
+- **Context:** FR-1.3 asks for start, stop (graceful and forced) and reboot. The PRD does not say
+  what happens on a wrong-state request, how long a graceful stop waits, or what undo means here.
+- **Decision:** The API sets `desired_state` (start/reboot → `running`, stop → `stopped`) in the same
+  transaction as the task row, holding `SELECT vm FOR UPDATE`. Workers set `actual_state`. Each step
+  checks `domain_state` first. Starting a running VM, or stopping a stopped one, succeeds without
+  calling the driver. Rebooting a stopped VM starts it. Graceful stop calls the new
+  `HostDriver.shutdown_domain`, then polls until `shut_off` or `Settings.vm_shutdown_timeout_s`
+  (default 60). On timeout the step fails. It never falls back to force on its own: the client
+  sends `{force: true}`, which uses `destroy_domain`. There are no undos, because "un-starting" a VM
+  is not a useful rollback. Instead `on_rolled_back` copies the driver's real state into
+  `actual_state` (`error` if the domain is gone).
+- **Consequences:** Desired and actual state can differ after a failure. That is visible, and Q04's
+  reconciler closes the gap. A reboot step re-run after a crash may reboot twice, which does no harm.
+  The FakeDriver's graceful shutdown finishes at once. Real libvirt returns before the guest is off,
+  so the polling loop matters there.
+- **How to undo:** To auto-escalate, call `destroy_domain` after the timeout instead of failing.
+
+## D-018 VM delete: forward-only steps; the name stays reserved until the delete finishes
+- **Context:** FR-1.3 delete means destroy, undefine and delete the disk. The disk path comes from
+  the name (D-011), and names are unique only among non-`absent` rows (D-012).
+- **Decision:** The `vm.delete` steps are `destroy_domain`, `undefine_domain`, `delete_disk` and
+  `mark_absent`, each skipped if already done. None has an undo: a deleted disk cannot be restored.
+  The API does **not** set `desired_state='absent'`. Only `mark_absent`, the last step, does. So
+  the name and the `{storage_root}/{name}.qcow2` path stay reserved until the disk is really gone.
+  A new VM with the same name can therefore never have its fresh disk deleted. While a `vm.delete`
+  is pending or running, other VM operations get 409. If the delete fails, the task ends
+  `rolled_back` with `actual_state` taken from the driver (`error` if partly deleted). Sending
+  DELETE again finishes the job.
+- **Consequences:** Delete is retryable, never half-undone, and crash-safe at every kill point
+  (Q03.5). Until it finishes, `desired_state` still says `running`/`stopped`, so the Q04
+  reconciler must skip VMs that have a pending or running task.
+- **How to undo:** Set `absent` in the API instead, and give each VM its own disk path (for
+  example `{name}-{id}.qcow2`) so names and paths stop being linked.
