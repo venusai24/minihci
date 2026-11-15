@@ -16,6 +16,7 @@ def sleeper(log, name="test.sleep", kind="vm", fail=False):
         log.append("end")
         if fail:
             raise RuntimeError("fail after sleep")
+
     return TaskType(name, kind, [Step("sleep", body)])
 
 

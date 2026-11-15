@@ -52,8 +52,10 @@ def test_each_step_safe_to_rerun(client, session_factory, driver, host_id, idx):
     drain(session_factory, driver)
     with session_factory() as s:
         t = s.get(Task, tid)
-        t.steps = [{**st, "status": "done" if i < idx else ("running" if i == idx else "pending")}
-                   for i, st in enumerate(t.steps)]
+        t.steps = [
+            {**st, "status": "done" if i < idx else ("running" if i == idx else "pending")}
+            for i, st in enumerate(t.steps)
+        ]
         t.state = "pending"
         s.commit()
     drain(session_factory, driver)
@@ -74,10 +76,17 @@ def test_start_failure_rolls_back_everything(client, session_factory, driver, ho
     assert_db_matches_driver(session_factory, driver)
 
 
-@pytest.mark.parametrize("override", [
-    {"name": "../etc"}, {"name": "Web 1"}, {"name": ""}, {"name": "a" * 64},
-    {"vcpus": 0}, {"mem_mb": -1},
-])
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"name": "../etc"},
+        {"name": "Web 1"},
+        {"name": ""},
+        {"name": "a" * 64},
+        {"vcpus": 0},
+        {"mem_mb": -1},
+    ],
+)
 def test_vm_validation(client, host_id, override):
     assert client.post("/vms", json=body(host_id, **override)).status_code == 422
 

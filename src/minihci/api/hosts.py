@@ -26,9 +26,7 @@ def register_host(
     idempotency_key: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     def create(s: Session):
-        taken = s.scalars(
-            select(Host).where(or_(Host.name == body.name, Host.libvirt_uri == body.libvirt_uri))
-        ).first()
+        taken = s.scalars(select(Host).where(or_(Host.name == body.name, Host.libvirt_uri == body.libvirt_uri))).first()
         if taken is not None:
             raise HTTPException(409, "host name or libvirt_uri already registered")
         host = Host(name=body.name, libvirt_uri=body.libvirt_uri, status="registering")

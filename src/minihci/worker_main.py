@@ -1,4 +1,5 @@
 """Worker process: python -m minihci.worker_main"""
+
 import logging
 import signal
 import sys
@@ -45,9 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         session_factory = make_session_factory(engine)
         driver = build_driver(settings)
         report = recover_orphans(session_factory, driver, settings, REGISTRY)
-        logger.info(
-            "recovery: resumed=%s rolled_back=%s failed=%s", report.resumed, report.rolled_back, report.failed
-        )
+        logger.info("recovery: resumed=%s rolled_back=%s failed=%s", report.resumed, report.rolled_back, report.failed)
         stop = threading.Event()
 
         def _stop(signum: int, _frame: FrameType | None) -> None:

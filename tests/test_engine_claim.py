@@ -37,7 +37,7 @@ def test_claim_skips_row_locked_by_another_transaction(session_factory):
         s.commit()
     with session_factory() as holder:
         holder.execute(select(Task).where(Task.id == a.id).with_for_update()).scalar_one()
-        t = claim_next(session_factory)          # must not block on a
+        t = claim_next(session_factory)  # must not block on a
         assert t.id == b.id
         holder.rollback()
 

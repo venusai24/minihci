@@ -17,11 +17,25 @@ def make_host(s, name="h1", status="ready"):
 def test_tables_and_columns(engine):
     insp = inspect(engine)
     assert {"hosts", "vms", "tasks"} <= set(insp.get_table_names())
-    assert {"id", "name", "host_id", "vcpus", "mem_mb", "image", "disk_path",
-            "desired_state", "actual_state"} <= {c["name"] for c in insp.get_columns("vms")}
+    assert {"id", "name", "host_id", "vcpus", "mem_mb", "image", "disk_path", "desired_state", "actual_state"} <= {
+        c["name"] for c in insp.get_columns("vms")
+    }
     tcols = {c["name"]: c for c in insp.get_columns("tasks")}
-    assert {"id", "type", "target_id", "state", "steps", "params", "idempotency_key", "request_hash",
-            "attempts", "created_at", "started_at", "finished_at", "error"} <= set(tcols)
+    assert {
+        "id",
+        "type",
+        "target_id",
+        "state",
+        "steps",
+        "params",
+        "idempotency_key",
+        "request_hash",
+        "attempts",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "error",
+    } <= set(tcols)
     assert str(tcols["steps"]["type"]) == "JSONB"
 
 

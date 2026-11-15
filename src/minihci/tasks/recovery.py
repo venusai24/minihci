@@ -36,9 +36,10 @@ def recover_orphans(
     """Resolve tasks left `running` by a dead worker. Call once at process start, before claiming."""
     report = RecoveryReport()
     with session_factory() as s:
-        orphans = [(t.id, t.type, t.attempts, t.steps) for t in s.scalars(
-            select(Task).where(Task.state == TaskState.RUNNING).order_by(Task.id)
-        )]
+        orphans = [
+            (t.id, t.type, t.attempts, t.steps)
+            for t in s.scalars(select(Task).where(Task.state == TaskState.RUNNING).order_by(Task.id))
+        ]
     for task_id, type_, attempts, steps in orphans:
         with task_context(task_id):
             if type_ not in registry:

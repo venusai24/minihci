@@ -15,6 +15,7 @@ def creator(calls=None, barrier=None):
         if barrier is not None:
             barrier.wait(timeout=5)
         return enqueue(s, "test.noop", 1, {})
+
     return create
 
 
@@ -89,7 +90,7 @@ def test_create_failing_because_a_concurrent_winner_committed_returns_the_replay
             raise HTTPException(409, "vm name already exists")
         raise IntegrityError("insert", {}, Exception("other constraint"))
 
-    task, created = run_idempotent(session_factory, "race2", FP, losing_create)
+    _task, created = run_idempotent(session_factory, "race2", FP, losing_create)
     assert not created and count(session_factory) == 1
 
 

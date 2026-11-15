@@ -8,4 +8,4 @@ def register(tt: TaskType) -> TaskType:
     return tt
 
 
-from minihci.tasks import types as _types  # noqa: E402,F401  (populate REGISTRY)
+from minihci.tasks import types as _types  # noqa: F401  (populate REGISTRY)

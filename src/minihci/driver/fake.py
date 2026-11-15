@@ -1,4 +1,5 @@
 """In-memory (optionally file-backed) driver. Deliberately NOT idempotent, like libvirt."""
+
 import fcntl
 import json
 import os
@@ -60,14 +61,14 @@ class FakeDriver:
                     fcntl.flock(lf, fcntl.LOCK_UN)
 
     def _call(self, method: str, fn: Callable[[dict[str, Any]], Any]) -> Any:
-        if (d := self.delays.get(method)):
+        if d := self.delays.get(method):
             time.sleep(d)
         if self.fail.get(method, 0) > 0:
             self.fail[method] -= 1
             raise DriverError(f"injected failure: {method}")
         with self._locked() as state:
             result = fn(state)
-        if (d := self.delays_after.get(method)):
+        if d := self.delays_after.get(method):
             time.sleep(d)
         return result
 

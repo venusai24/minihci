@@ -5,8 +5,16 @@ import pytest
 
 from minihci.config import Settings
 from minihci.driver import build_driver
-from minihci.driver.base import (DomainExists, DomainNotFound, DomainSpec, DomainState, DriverError,
-                                 HostDriver, HostInfo, HostUnreachable)
+from minihci.driver.base import (
+    DomainExists,
+    DomainNotFound,
+    DomainSpec,
+    DomainState,
+    DriverError,
+    HostDriver,
+    HostInfo,
+    HostUnreachable,
+)
 from minihci.driver.fake import FakeDriver
 
 URI = "qemu+ssh://a/system"
@@ -78,7 +86,7 @@ def test_delay_before_hides_effect_delay_after_shows_it(drv):
     th = threading.Thread(target=drv.define_domain, args=(URI, SPEC))
     th.start()
     time.sleep(0.2)
-    assert drv.domain_state(URI, "vm1") is None      # not yet applied; reads are not blocked
+    assert drv.domain_state(URI, "vm1") is None  # not yet applied; reads are not blocked
     th.join()
     drv.delays.clear()
     drv.delays_after["start_domain"] = 0.5

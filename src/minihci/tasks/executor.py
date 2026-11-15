@@ -155,7 +155,5 @@ def rollback_task(
             try:
                 tt.on_rolled_back(ctx)
             except Exception as e:  # noqa: BLE001
-                return _finish(
-                    session_factory, task_id, TaskState.FAILED, f"{reason}; on_rolled_back failed: {e}"
-                )
+                return _finish(session_factory, task_id, TaskState.FAILED, f"{reason}; on_rolled_back failed: {e}")
         return _finish(session_factory, task_id, TaskState.ROLLED_BACK, reason)

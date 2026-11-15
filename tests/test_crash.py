@@ -11,8 +11,11 @@ from minihci.driver.fake import FakeDriver
 from tests.helpers import add_ready_host, assert_db_matches_driver, load_task, spawn_worker, wait_for
 
 TERMINAL = ("succeeded", "failed", "rolled_back")
-STEP_TO_METHOD = {"create_disk": "create_disk_overlay", "define_domain": "define_domain",
-                  "start_domain": "start_domain"}
+STEP_TO_METHOD = {
+    "create_disk": "create_disk_overlay",
+    "define_domain": "define_domain",
+    "start_domain": "start_domain",
+}
 KILL_POINTS = [(step, where) for step in STEP_TO_METHOD for where in ("before", "after")]
 
 
@@ -26,19 +29,20 @@ def start_create_and_kill(session_factory, tmp_path, step, where):
     state = tmp_path / "fake.json"
     add_ready_host(session_factory, FakeDriver(state_file=state))
     client = TestClient(create_app(Settings(storage_root="/srv/test-images"), session_factory=session_factory))
-    tid = client.post("/vms", json={"name": "web1", "host_id": 1, "vcpus": 1, "mem_mb": 512,
-                                    "image": "/img/alpine.qcow2"}).json()["task_id"]
+    tid = client.post(
+        "/vms", json={"name": "web1", "host_id": 1, "vcpus": 1, "mem_mb": 512, "image": "/img/alpine.qcow2"}
+    ).json()["task_id"]
     env_key = "MINIHCI_FAKE_DELAYS" if where == "before" else "MINIHCI_FAKE_DELAYS_AFTER"
     w1 = spawn_worker(state, {env_key: json.dumps({STEP_TO_METHOD[step]: 30})})
     try:
         wait_for(lambda: step_status(session_factory, tid, step) == "running", timeout=10)
-        time.sleep(0.3)                      # inside the injected sleep: effect applied iff where == "after"
+        time.sleep(0.3)  # inside the injected sleep: effect applied iff where == "after"
         w1.send_signal(signal.SIGKILL)
         w1.wait(timeout=5)
     finally:
         if w1.poll() is None:
             w1.kill()
-    assert load_task(session_factory, tid).state == "running"      # orphaned, not silently finished
+    assert load_task(session_factory, tid).state == "running"  # orphaned, not silently finished
     return tid, state
 
 

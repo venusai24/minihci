@@ -63,7 +63,7 @@ class Worker:
                         if give_up:
                             t.error = f"infrastructure error: {exc}"
                             t.finished_at = func.now()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("could not requeue task; it will be recovered at next worker start")
 
     def run_forever(self, stop: threading.Event) -> None:
@@ -71,6 +71,6 @@ class Worker:
             try:
                 if self.run_once() is None:
                     stop.wait(self.settings.worker_poll_interval_s)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("worker loop error")
                 stop.wait(self.settings.worker_poll_interval_s)

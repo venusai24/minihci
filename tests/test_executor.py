@@ -37,7 +37,7 @@ def test_step_committed_as_running_before_it_executes(session_factory):
     seen = {}
 
     def peek(ctx):
-        with session_factory() as s:          # separate session: only sees committed data
+        with session_factory() as s:  # separate session: only sees committed data
             seen["steps"] = s.get(Task, ctx.task_id).steps
 
     tt = TaskType("test.peek", "vm", [Step("only", peek)])
@@ -95,8 +95,7 @@ def test_rollback_task_directly(session_factory):
     with session_factory() as s:
         s.get(Task, tid).steps = step_rows(("a", "done"), ("b", "running"), ("c", "pending"))
         s.commit()
-    state = rollback_task(tid, session_factory, FakeDriver(), Settings(), {tt.name: tt},
-                          reason="max attempts exceeded")
+    state = rollback_task(tid, session_factory, FakeDriver(), Settings(), {tt.name: tt}, reason="max attempts exceeded")
     assert state == TaskState.ROLLED_BACK
     assert calls == [("undo", "b"), ("undo", "a")]
     assert "max attempts exceeded" in load_task(session_factory, tid).error

@@ -30,8 +30,9 @@ def test_process_recovers_orphans_and_drains_queue(session_factory, tmp_path):
         h1 = Host(name="a", libvirt_uri=URI)
         s.add(h1)
         s.flush()
-        orphan = Task(type="host.register", target_id=h1.id, params={}, state="running", attempts=1,
-                      started_at=func.now())
+        orphan = Task(
+            type="host.register", target_id=h1.id, params={}, state="running", attempts=1, started_at=func.now()
+        )
         s.add(orphan)
         s.commit()
         orphan_id = orphan.id

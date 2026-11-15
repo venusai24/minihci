@@ -12,9 +12,7 @@ class Base(DeclarativeBase):
 
 class Host(Base):
     __tablename__ = "hosts"
-    __table_args__ = (
-        CheckConstraint("status in ('registering','ready','failed')", name="ck_hosts_status"),
-    )
+    __table_args__ = (CheckConstraint("status in ('registering','ready','failed')", name="ck_hosts_status"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(unique=True)
@@ -29,9 +27,7 @@ class Vm(Base):
     __tablename__ = "vms"
     __table_args__ = (
         CheckConstraint("desired_state in ('running','stopped','absent')", name="ck_vms_desired_state"),
-        CheckConstraint(
-            "actual_state in ('pending','running','stopped','absent','error')", name="ck_vms_actual_state"
-        ),
+        CheckConstraint("actual_state in ('pending','running','stopped','absent','error')", name="ck_vms_actual_state"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -48,9 +44,7 @@ class Vm(Base):
 class Task(Base):
     __tablename__ = "tasks"
     __table_args__ = (
-        CheckConstraint(
-            "state in ('pending','running','succeeded','failed','rolled_back')", name="ck_tasks_state"
-        ),
+        CheckConstraint("state in ('pending','running','succeeded','failed','rolled_back')", name="ck_tasks_state"),
         UniqueConstraint("idempotency_key", name="uq_tasks_idempotency_key"),
         Index("ix_tasks_state_id", "state", "id"),
     )

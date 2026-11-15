@@ -30,8 +30,16 @@ def test_register_host_returns_202_and_pending_task(client):
     assert r.headers["location"] == f"/tasks/{body['task_id']}"
     t = client.get(f"/tasks/{body['task_id']}").json()
     assert (t["state"], t["type"], t["target_id"]) == ("pending", "host.register", body["target_id"])
-    assert client.get("/hosts").json() == [{"id": body["target_id"], "name": "a", "libvirt_uri": URI,
-                                            "status": "registering", "cpu_total": None, "mem_total_mb": None}]
+    assert client.get("/hosts").json() == [
+        {
+            "id": body["target_id"],
+            "name": "a",
+            "libvirt_uri": URI,
+            "status": "registering",
+            "cpu_total": None,
+            "mem_total_mb": None,
+        }
+    ]
 
 
 def test_worker_probes_and_marks_ready(client, session_factory):
@@ -47,10 +55,10 @@ def test_worker_probes_and_marks_ready(client, session_factory):
 
 def test_unreachable_host_rolls_back_and_is_marked_failed(client, session_factory):
     tid = client.post("/hosts", json={"name": "a", "libvirt_uri": URI}).json()["task_id"]
-    drain(session_factory, FakeDriver())        # host unknown to the driver
+    drain(session_factory, FakeDriver())  # host unknown to the driver
     t = client.get(f"/tasks/{tid}").json()
     assert t["state"] == "rolled_back"
-    assert URI in t["error"]                    # FakeDriver raises HostUnreachable(uri)
+    assert URI in t["error"]  # FakeDriver raises HostUnreachable(uri)
     assert client.get("/hosts").json()[0]["status"] == "failed"
 
 

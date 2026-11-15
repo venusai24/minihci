@@ -16,6 +16,7 @@ dev = [
     "pytest",
     "pytest-timeout",
     "httpx",
+    "ruff>=0.17.5",
 ]
 
 [build-system]

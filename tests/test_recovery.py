@@ -11,8 +11,7 @@ MID = step_rows(("a", "done"), ("b", "running"), ("c", "pending"))
 
 def orphan(session_factory, attempts, steps=MID, type_="test.three", state="running") -> int:
     with session_factory() as s:
-        t = Task(type=type_, target_id=1, params={}, state=state, attempts=attempts, steps=steps,
-                 started_at=func.now())
+        t = Task(type=type_, target_id=1, params={}, state=state, attempts=attempts, steps=steps, started_at=func.now())
         s.add(t)
         s.commit()
         return t.id

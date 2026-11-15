@@ -2,13 +2,15 @@ from minihci.models import Task
 from minihci.tasks.executor import Step, TaskType
 
 
-def make_three_step_type(calls: list, fail_at: str | None = None, undo_fails: bool = False,
-                         name: str = "test.three") -> TaskType:
+def make_three_step_type(
+    calls: list, fail_at: str | None = None, undo_fails: bool = False, name: str = "test.three"
+) -> TaskType:
     def do(step):
         def f(ctx):
             calls.append(("do", step))
             if step == fail_at:
                 raise RuntimeError(f"boom in {step}")
+
         return f
 
     def undo(step):
@@ -16,6 +18,7 @@ def make_three_step_type(calls: list, fail_at: str | None = None, undo_fails: bo
             calls.append(("undo", step))
             if undo_fails:
                 raise RuntimeError(f"undo broke {step}")
+
         return f
 
     return TaskType(name=name, target_kind="vm", steps=[Step(n, do(n), undo(n)) for n in ("a", "b", "c")])
@@ -92,14 +95,19 @@ from tests.dbutil import TEST_DB_URL
 
 
 def spawn_worker(state_file: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
-    full = os.environ | {
-        "MINIHCI_DATABASE_URL": TEST_DB_URL,
-        "MINIHCI_DRIVER": "fake",
-        "MINIHCI_FAKE_STATE_FILE": str(state_file),
-        "MINIHCI_WORKER_POLL_INTERVAL_S": "0.05",
-    } | (env or {})
-    return subprocess.Popen([sys.executable, "-m", "minihci.worker_main"], env=full,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    full = (
+        os.environ
+        | {
+            "MINIHCI_DATABASE_URL": TEST_DB_URL,
+            "MINIHCI_DRIVER": "fake",
+            "MINIHCI_FAKE_STATE_FILE": str(state_file),
+            "MINIHCI_WORKER_POLL_INTERVAL_S": "0.05",
+        }
+        | (env or {})
+    )
+    return subprocess.Popen(
+        [sys.executable, "-m", "minihci.worker_main"], env=full, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+    )
 
 
 def wait_for(predicate, timeout: float, interval: float = 0.1) -> None:
