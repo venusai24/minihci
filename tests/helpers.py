@@ -80,3 +80,32 @@ def assert_db_matches_driver(session_factory, driver) -> None:
     for h in hosts.values():
         for name in driver.list_domains(h.libvirt_uri):
             assert (h.libvirt_uri, name) in tracked, f"untracked domain {name} on {h.libvirt_uri}"
+
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from tests.dbutil import TEST_DB_URL
+
+
+def spawn_worker(state_file: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
+    full = os.environ | {
+        "MINIHCI_DATABASE_URL": TEST_DB_URL,
+        "MINIHCI_DRIVER": "fake",
+        "MINIHCI_FAKE_STATE_FILE": str(state_file),
+        "MINIHCI_WORKER_POLL_INTERVAL_S": "0.05",
+    } | (env or {})
+    return subprocess.Popen([sys.executable, "-m", "minihci.worker_main"], env=full,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def wait_for(predicate, timeout: float, interval: float = 0.1) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    raise AssertionError(f"condition not met within {timeout}s")

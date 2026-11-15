@@ -1,0 +1,79 @@
+"""Worker process: python -m minihci.worker_main"""
+import logging
+import signal
+import sys
+import threading
+from types import FrameType
+
+from sqlalchemy import Connection, Engine, create_engine, text
+from sqlalchemy.pool import NullPool
+
+from minihci.config import Settings
+from minihci.db import make_engine, make_session_factory
+from minihci.driver import build_driver
+from minihci.logging import configure_logging
+from minihci.tasks.recovery import recover_orphans
+from minihci.tasks.registry import REGISTRY
+from minihci.tasks.worker import Worker
+
+logger = logging.getLogger("minihci.worker_main")
+
+
+def acquire_singleton(engine: Engine) -> Connection | None:
+    """Take the process-wide worker lock, or return None if another worker holds it.
+
+    The lock is session-level, so it lives on a dedicated NON-pooled connection: closing the
+    returned connection really closes the DB session, which is what releases the lock (and a
+    crashed process releases it the same way).
+    """
+    conn = create_engine(engine.url, poolclass=NullPool).connect().execution_options(isolation_level="AUTOCOMMIT")
+    if conn.execute(text("SELECT pg_try_advisory_lock(0, 0)")).scalar():
+        return conn
+    conn.close()
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    settings = Settings()
+    configure_logging()
+    engine = make_engine(settings.database_url)
+    singleton = acquire_singleton(engine)
+    if singleton is None:
+        logger.error("another worker already holds the singleton lock; exiting")
+        return 1
+    try:
+        session_factory = make_session_factory(engine)
+        driver = build_driver(settings)
+        report = recover_orphans(session_factory, driver, settings, REGISTRY)
+        logger.info(
+            "recovery: resumed=%s rolled_back=%s failed=%s", report.resumed, report.rolled_back, report.failed
+        )
+        stop = threading.Event()
+
+        def _stop(signum: int, _frame: FrameType | None) -> None:
+            logger.info("signal %d received; stopping", signum)
+            stop.set()
+
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+        threads = [
+            threading.Thread(
+                target=Worker(session_factory, driver, settings, REGISTRY).run_forever,
+                args=(stop,),
+                name=f"worker-{i}",
+            )
+            for i in range(settings.worker_threads)
+        ]
+        for th in threads:
+            th.start()
+        logger.info("worker started with %d threads", len(threads))
+        for th in threads:
+            th.join()
+        return 0
+    finally:
+        singleton.close()
+        engine.dispose()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
