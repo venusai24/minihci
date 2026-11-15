@@ -19,9 +19,13 @@ class JsonFormatter(logging.Formatter):
             "msg": record.getMessage(),
             "task_id": _task_id.get(),
         }
+        fields = getattr(record, "fields", None)
+        if isinstance(fields, dict):
+            for k, v in fields.items():
+                payload.setdefault(k, v)  # never clobber core keys
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
-        return json.dumps(payload)
+        return json.dumps(payload, default=str)
 
 
 def configure_logging(level: str = "INFO", stream: TextIO = sys.stderr) -> None:
