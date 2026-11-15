@@ -251,3 +251,19 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   If the domain comes back, the next pass sees it and copies its real state in.
 - **How to undo:** Enqueue `vm.create` for missing VMs whose disk still exists. Its steps check state
   first, so it would only define and start the domain.
+
+## D-021 `/metrics` is computed from the DB at scrape time
+- **Context:** NFR-4 wants Prometheus metrics for task counts, task/migration times and heartbeat
+  status. Tasks run in separate worker processes, so in-process counters in the API would miss them,
+  and the API must never import `minihci.driver`. The `migrations` table does not exist until Q08.
+- **Decision:** `api/metrics.py` builds a fresh `CollectorRegistry` per request with one custom
+  collector that queries Postgres: `minihci_tasks{type,state}` (gauge), `minihci_task_duration_seconds{type}`
+  (histogram from `finished_at - started_at`, fixed buckets 0.1/0.5/1/5/15/60/300s),
+  `minihci_host_status{host,status}` (one-hot, removed hosts excluded) and
+  `minihci_host_last_heartbeat_timestamp_seconds{host}`. `minihci_migration_duration_seconds` and
+  `minihci_migration_downtime_seconds` are emitted now with no samples; Q08 fills them from `migrations`.
+- **Consequences:** Numbers are correct across processes and restarts, no multiprocess setup. Each
+  scrape runs a few GROUP BY queries over the whole tasks table, fine at this scale. Histograms are
+  recomputed, not true counters, so they shrink if task rows are ever deleted.
+- **How to undo:** Switch to `prometheus_client` multiprocess mode with counters incremented in the
+  executor, or add an index/rollup table if scrapes get slow.
