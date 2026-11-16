@@ -3,7 +3,7 @@ from alembic import command
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
-from minihci.models import Host, HostMetric, Migration, Task, Vm
+from minihci.models import HaRestart, Host, HostMetric, Migration, Task, Vm
 from tests.dbutil import TEST_DB_URL, alembic_config, truncate_if_present
 
 
@@ -254,3 +254,67 @@ def test_downgrade_to_0008_drops_missed_heartbeats_and_maps_suspect_dead_to_fail
         with engine.begin() as c:
             c.execute(text("TRUNCATE hosts CASCADE"))
     assert "missed_heartbeats" in {c["name"] for c in inspect(engine).get_columns("hosts")}
+
+
+def test_vm_pending_restart_accepted_and_bogus_rejected(session_factory):
+    with session_factory() as s:
+        h = make_host(s)
+        s.add(_vm(h, actual_state="pending_restart"))
+        s.commit()
+        assert s.scalars(select(Vm)).one().actual_state == "pending_restart"
+        s.add(_vm(h, name="web2", path="/srv/w2.qcow2", actual_state="bogus"))
+        with pytest.raises(IntegrityError, match="ck_vms_actual_state"):
+            s.commit()
+
+
+def _ha_parts(s):
+    h1 = make_host(s, "h1")
+    h2 = make_host(s, "h2")
+    vm = _vm(h1)
+    t = Task(type="vm.ha_restart", target_id=1)
+    s.add_all([vm, t])
+    s.flush()
+    return h1, h2, vm, t
+
+
+def _ha(h1, h2, vm, t, **kw):
+    from datetime import UTC, datetime
+
+    return HaRestart(task_id=t.id, vm_id=vm.id, from_host_id=h1.id, to_host_id=h2.id, failed_at=datetime.now(UTC), **kw)
+
+
+def test_ha_restart_row_defaults_and_task_unique(session_factory):
+    with session_factory() as s:
+        parts = _ha_parts(s)
+        s.add(_ha(*parts))
+        s.commit()
+        r = s.scalars(select(HaRestart)).one()
+        assert r.created_at is not None and r.running_at is None and r.recovery_ms is None
+        s.add(_ha(*parts))
+        with pytest.raises(IntegrityError, match="uq_ha_restarts_task_id"):
+            s.commit()
+
+
+def test_downgrade_to_0009_drops_ha_restarts_and_maps_pending_restart_to_error(engine):
+    cfg = alembic_config(TEST_DB_URL)
+    command.upgrade(cfg, "head")
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE tasks, vms, hosts CASCADE"))
+        hid = c.execute(text("INSERT INTO hosts (name, libvirt_uri) VALUES ('h', 'u') RETURNING id")).scalar_one()
+        c.execute(
+            text(
+                "INSERT INTO vms (name, host_id, vcpus, mem_mb, image, disk_path, desired_state, actual_state) "
+                "VALUES ('v', :h, 1, 512, 'i', '/d', 'running', 'pending_restart')"
+            ),
+            {"h": hid},
+        )
+    try:
+        command.downgrade(cfg, "0009")
+        assert "ha_restarts" not in inspect(engine).get_table_names()
+        with engine.connect() as c:
+            assert c.execute(text("SELECT actual_state FROM vms")).scalar_one() == "error"
+    finally:
+        command.upgrade(cfg, "head")
+        with engine.begin() as c:
+            c.execute(text("TRUNCATE tasks, vms, hosts CASCADE"))
+    assert "ha_restarts" in inspect(engine).get_table_names()

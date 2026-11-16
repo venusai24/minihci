@@ -46,7 +46,8 @@ class Vm(Base):
     __table_args__ = (
         CheckConstraint("desired_state in ('running','stopped','absent')", name="ck_vms_desired_state"),
         CheckConstraint(
-            "actual_state in ('pending','running','stopped','absent','error','missing')", name="ck_vms_actual_state"
+            "actual_state in ('pending','running','stopped','absent','error','missing','pending_restart')",
+            name="ck_vms_actual_state",
         ),
         Index("uq_vms_name_live", "name", unique=True, postgresql_where=text("desired_state <> 'absent'")),
     )
@@ -140,3 +141,18 @@ class Migration(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_ms: Mapped[int | None]
     downtime_ms: Mapped[int | None]
+
+
+class HaRestart(Base):
+    __tablename__ = "ha_restarts"
+    __table_args__ = (UniqueConstraint("task_id", name="uq_ha_restarts_task_id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    vm_id: Mapped[int] = mapped_column(ForeignKey("vms.id"))
+    from_host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id"))
+    to_host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id"))
+    failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    running_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recovery_ms: Mapped[int | None]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -26,6 +26,8 @@ def engine():
 def session_factory(engine):
     with engine.begin() as c:
         c.execute(
-            text("TRUNCATE tasks, vms, hosts, scheduler_config, host_metrics, migrations RESTART IDENTITY CASCADE")
+            text(
+                "TRUNCATE tasks, vms, hosts, scheduler_config, host_metrics, migrations, ha_restarts RESTART IDENTITY CASCADE"
+            )
         )
     return make_session_factory(engine)
