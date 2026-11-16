@@ -4,6 +4,7 @@ from sqlalchemy import text
 
 from minihci.db import make_engine, make_session_factory
 from tests.dbutil import TEST_DB_URL, alembic_config, truncate_if_present
+from tests.stubs.fake_libvirt import stub_libvirt  # noqa: F401  (fixture)
 
 
 @pytest.fixture(scope="session")
