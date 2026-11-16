@@ -252,3 +252,88 @@ def test_hosts_health(monkeypatch):
     assert res.exit_code == 0, res.output
     assert seen == [("GET", "/hosts/3/health")]
     assert "healthy: True" in res.stdout
+
+
+def _capture(monkeypatch, status=202, body=None):
+    reqs = []
+
+    def h(r):
+        reqs.append((r.method, r.url.path, json.loads(r.content) if r.content else None))
+        return httpx.Response(status, json=body if body is not None else {"task_id": 5, "target_id": 1})
+
+    _install(monkeypatch, h)
+    return reqs
+
+
+def test_vms_create(monkeypatch):
+    reqs = _capture(monkeypatch)
+    res = runner.invoke(
+        cli.app, ["vms", "create", "web", "--vcpus", "2", "--mem-mb", "512", "--image", "cirros", "--host-id", "3"]
+    )
+    assert res.exit_code == 0, res.output
+    assert reqs == [("POST", "/vms", {"name": "web", "vcpus": 2, "mem_mb": 512, "image": "cirros", "host_id": 3})]
+    assert res.stdout.strip() == "5"
+
+
+def test_vms_create_no_host(monkeypatch):
+    reqs = _capture(monkeypatch)
+    res = runner.invoke(cli.app, ["vms", "create", "web", "--vcpus", "1", "--mem-mb", "64", "--image", "c"])
+    assert res.exit_code == 0
+    assert "host_id" not in reqs[0][2]
+
+
+def test_vms_create_422(monkeypatch):
+    _capture(monkeypatch, 422, {"detail": [{"msg": "bad"}]})
+    res = runner.invoke(cli.app, ["vms", "create", "W", "--vcpus", "1", "--mem-mb", "64", "--image", "c"])
+    assert res.exit_code == 1
+
+
+def test_vms_list_show(monkeypatch):
+    reqs = _capture(monkeypatch, 200, [{"id": 1, "name": "a", "host_id": 2, "actual_state": "running"}])
+    res = runner.invoke(cli.app, ["vms", "list"])
+    assert res.exit_code == 0 and "running" in res.output
+    assert reqs[0][:2] == ("GET", "/vms")
+    reqs.clear()
+    runner.invoke(cli.app, ["vms", "show", "1"])
+    assert reqs[0][:2] == ("GET", "/vms/1")
+
+
+def test_vms_actions(monkeypatch):
+    reqs = _capture(monkeypatch)
+    for args in (["start", "1"], ["reboot", "1"], ["stop", "1"], ["stop", "1", "--force"], ["rm", "1"]):
+        assert runner.invoke(cli.app, ["vms", *args]).exit_code == 0
+    assert reqs == [
+        ("POST", "/vms/1/start", None),
+        ("POST", "/vms/1/reboot", None),
+        ("POST", "/vms/1/stop", None),
+        ("POST", "/vms/1/stop", {"force": True}),
+        ("DELETE", "/vms/1", None),
+    ]
+
+
+def test_vms_migrate(monkeypatch):
+    reqs = _capture(monkeypatch)
+    res = runner.invoke(cli.app, ["vms", "migrate", "1", "--to", "2", "--idempotency-key", "k"])
+    assert res.exit_code == 0
+    assert reqs == [("POST", "/vms/1/migrate", {"host_id": 2})]
+
+
+def test_scheduler_get(monkeypatch):
+    reqs = _capture(monkeypatch, 200, {"cpu_headroom_pct": 20})
+    res = runner.invoke(cli.app, ["scheduler", "get"])
+    assert res.exit_code == 0 and "cpu_headroom_pct: 20" in res.output
+    assert reqs[0][:2] == ("GET", "/scheduler/config")
+
+
+def test_scheduler_set(monkeypatch):
+    reqs = _capture(monkeypatch)
+    res = runner.invoke(cli.app, ["scheduler", "set", "--cpu-headroom-pct", "30", "--no-rebalance-enabled"])
+    assert res.exit_code == 0, res.output
+    assert reqs == [("PUT", "/scheduler/config", {"cpu_headroom_pct": 30, "rebalance_enabled": False})]
+
+
+def test_scheduler_set_nothing(monkeypatch):
+    reqs = _capture(monkeypatch)
+    res = runner.invoke(cli.app, ["scheduler", "set"])
+    assert res.exit_code == 1
+    assert reqs == []

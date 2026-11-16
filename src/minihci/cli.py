@@ -188,3 +188,117 @@ def hosts_rm(
 @hosts_app.command("health")
 def hosts_health(ctx: typer.Context, host_id: int) -> None:
     output(ctx, request(ctx, "GET", f"/hosts/{host_id}/health"))
+
+
+vms_app = typer.Typer(help="Manage VMs", no_args_is_help=True)
+app.add_typer(vms_app, name="vms")
+
+
+@vms_app.command("create")
+def vms_create(
+    ctx: typer.Context,
+    name: str,
+    vcpus: int = typer.Option(..., "--vcpus"),
+    mem_mb: int = typer.Option(..., "--mem-mb"),
+    image: str = typer.Option(..., "--image"),
+    host_id: int | None = typer.Option(None, "--host-id"),
+    idempotency_key: str | None = IDEMPOTENCY_OPT,
+    wait: bool = WAIT_OPT,
+) -> None:
+    body: dict[str, Any] = {"name": name, "vcpus": vcpus, "mem_mb": mem_mb, "image": image}
+    if host_id is not None:
+        body["host_id"] = host_id
+    submit(ctx, "POST", "/vms", body, idempotency_key, wait)
+
+
+@vms_app.command("list")
+def vms_list(ctx: typer.Context) -> None:
+    cols = ["id", "name", "host_id", "vcpus", "mem_mb", "desired_state", "actual_state"]
+    output(ctx, request(ctx, "GET", "/vms"), cols)
+
+
+@vms_app.command("show")
+def vms_show(ctx: typer.Context, vm_id: int) -> None:
+    output(ctx, request(ctx, "GET", f"/vms/{vm_id}"))
+
+
+def _vm_action(ctx: typer.Context, vm_id: int, action: str, idempotency_key: str | None, wait: bool) -> None:
+    submit(ctx, "POST", f"/vms/{vm_id}/{action}", None, idempotency_key, wait)
+
+
+@vms_app.command("start")
+def vms_start(
+    ctx: typer.Context, vm_id: int, idempotency_key: str | None = IDEMPOTENCY_OPT, wait: bool = WAIT_OPT
+) -> None:
+    _vm_action(ctx, vm_id, "start", idempotency_key, wait)
+
+
+@vms_app.command("stop")
+def vms_stop(
+    ctx: typer.Context,
+    vm_id: int,
+    force: bool = typer.Option(False, "--force", help="Hard power-off"),
+    idempotency_key: str | None = IDEMPOTENCY_OPT,
+    wait: bool = WAIT_OPT,
+) -> None:
+    submit(ctx, "POST", f"/vms/{vm_id}/stop", {"force": True} if force else None, idempotency_key, wait)
+
+
+@vms_app.command("reboot")
+def vms_reboot(
+    ctx: typer.Context, vm_id: int, idempotency_key: str | None = IDEMPOTENCY_OPT, wait: bool = WAIT_OPT
+) -> None:
+    _vm_action(ctx, vm_id, "reboot", idempotency_key, wait)
+
+
+@vms_app.command("migrate")
+def vms_migrate(
+    ctx: typer.Context,
+    vm_id: int,
+    to: int = typer.Option(..., "--to", help="Destination host id"),
+    idempotency_key: str | None = IDEMPOTENCY_OPT,
+    wait: bool = WAIT_OPT,
+) -> None:
+    submit(ctx, "POST", f"/vms/{vm_id}/migrate", {"host_id": to}, idempotency_key, wait)
+
+
+@vms_app.command("rm")
+def vms_rm(
+    ctx: typer.Context, vm_id: int, idempotency_key: str | None = IDEMPOTENCY_OPT, wait: bool = WAIT_OPT
+) -> None:
+    submit(ctx, "DELETE", f"/vms/{vm_id}", None, idempotency_key, wait)
+
+
+scheduler_app = typer.Typer(help="Scheduler configuration", no_args_is_help=True)
+app.add_typer(scheduler_app, name="scheduler")
+
+
+@scheduler_app.command("get")
+def scheduler_get(ctx: typer.Context) -> None:
+    output(ctx, request(ctx, "GET", "/scheduler/config"))
+
+
+@scheduler_app.command("set")
+def scheduler_set(
+    ctx: typer.Context,
+    cpu_headroom_pct: int | None = typer.Option(None, "--cpu-headroom-pct"),
+    rebalance_enabled: bool | None = typer.Option(None, "--rebalance-enabled/--no-rebalance-enabled"),
+    rebalance_cpu_threshold_pct: int | None = typer.Option(None, "--rebalance-cpu-threshold-pct"),
+    rebalance_window_s: int | None = typer.Option(None, "--rebalance-window-s"),
+    rebalance_vm_cooldown_s: int | None = typer.Option(None, "--rebalance-vm-cooldown-s"),
+    rebalance_host_cooldown_s: int | None = typer.Option(None, "--rebalance-host-cooldown-s"),
+    idempotency_key: str | None = IDEMPOTENCY_OPT,
+    wait: bool = WAIT_OPT,
+) -> None:
+    fields = {
+        "cpu_headroom_pct": cpu_headroom_pct,
+        "rebalance_enabled": rebalance_enabled,
+        "rebalance_cpu_threshold_pct": rebalance_cpu_threshold_pct,
+        "rebalance_window_s": rebalance_window_s,
+        "rebalance_vm_cooldown_s": rebalance_vm_cooldown_s,
+        "rebalance_host_cooldown_s": rebalance_host_cooldown_s,
+    }
+    body = {k: v for k, v in fields.items() if v is not None}
+    if not body:
+        _fail("no scheduler settings given", EXIT_REJECTED)
+    submit(ctx, "PUT", "/scheduler/config", body, idempotency_key, wait)
