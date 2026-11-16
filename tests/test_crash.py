@@ -1,6 +1,7 @@
 import json
 import signal
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,8 +9,11 @@ from sqlalchemy import select
 
 from minihci.app import create_app
 from minihci.config import Settings
+from minihci.driver.base import DomainState
 from minihci.driver.fake import FakeDriver
-from minihci.models import Host, Migration, Vm
+from minihci.ha.failover import failover_once
+from minihci.ha.heartbeat import heartbeat_once
+from minihci.models import HaRestart, Host, Migration, Task, Vm
 from tests.helpers import add_ready_host, assert_db_matches_driver, drain, load_task, spawn_worker, wait_for
 from tests.test_vm_power import make_vm
 
@@ -211,4 +215,70 @@ def test_kill_mid_migrate_then_restart_leaves_vm_on_one_host(session_factory, tm
         placed = [h for h in s.scalars(select(Host)) if driver.domain_state(h.libvirt_uri, vm.name) is not None]
         assert [h.id for h in placed] == [vm.host_id] == [dst_id]
         assert vm.actual_state == "running"
+    assert_db_matches_driver(session_factory, driver)
+
+
+HA_URI_A = "qemu+ssh://a/system"
+HA_URI_B = "qemu+ssh://b/system"
+
+
+def start_ha_restart_and_kill(session_factory, tmp_path):
+    """Running VM on dead host a, failover pass enqueues vm.ha_restart, a slow worker blocks in start_domain
+    on host b (as it would waiting for the NFS lease), SIGKILL it. Returns (task_id, state_file, vm_id, b_id)."""
+    state = tmp_path / "fake.json"
+    driver = FakeDriver(state_file=state)
+    a_id = add_ready_host(session_factory, driver)
+    b_id = add_ready_host(session_factory, driver, name="b", uri=HA_URI_B)
+    vm_id = make_vm(session_factory, driver, a_id)
+    driver.power_off_host(HA_URI_A)
+    with session_factory() as s, s.begin():
+        h = s.get(Host, a_id)
+        h.status, h.last_heartbeat = "dead", datetime.now(UTC) - timedelta(seconds=40)
+    failover_once(session_factory, Settings())
+    with session_factory() as s:
+        (task,) = s.scalars(select(Task).where(Task.type == "vm.ha_restart")).all()
+        tid = task.id
+    w1 = spawn_worker(state, {"MINIHCI_FAKE_DELAYS": json.dumps({"start_domain": 30})})
+    try:
+        wait_for(lambda: step_status(session_factory, tid, "start_domain") == "running", timeout=10)
+        time.sleep(0.3)
+        w1.send_signal(signal.SIGKILL)
+        w1.wait(timeout=5)
+    finally:
+        if w1.poll() is None:
+            w1.kill()
+    assert load_task(session_factory, tid).state == "running"
+    with session_factory() as s:
+        assert s.get(Vm, vm_id).host_id == a_id  # mark_running never ran
+    return tid, state, vm_id, b_id
+
+
+@pytest.mark.timeout(60)
+def test_kill_mid_ha_restart_then_restart_resumes(session_factory, tmp_path):
+    tid, state, vm_id, b_id = start_ha_restart_and_kill(session_factory, tmp_path)
+    w2 = spawn_worker(state)
+    try:
+        wait_for(lambda: load_task(session_factory, tid).state in TERMINAL, timeout=15)
+    finally:
+        w2.send_signal(signal.SIGTERM)
+        w2.wait(timeout=10)
+    t = load_task(session_factory, tid)
+    assert t.state == "succeeded", t.error
+    assert t.attempts == 2
+    driver = FakeDriver(state_file=state)
+    # host a returns: reclaim removes its stale copy, leaving exactly one running copy
+    driver.power_on_host(HA_URI_A)
+    heartbeat_once(session_factory, driver, Settings(heartbeat_ping_timeout_s=0.5))
+    drain(session_factory, driver)
+    assert driver.domain_state(HA_URI_A, "web1") is None
+    with session_factory() as s:
+        vm = s.get(Vm, vm_id)
+        assert vm.host_id == b_id and vm.actual_state == "running"
+        running = [
+            h.id for h in s.scalars(select(Host)) if driver.domain_state(h.libvirt_uri, vm.name) == DomainState.RUNNING
+        ]
+        assert running == [b_id]
+        (ha,) = s.scalars(select(HaRestart)).all()
+        assert ha.running_at is not None and ha.recovery_ms is not None
+    assert driver.boot_count(HA_URI_B, "web1") == 1
     assert_db_matches_driver(session_factory, driver)
