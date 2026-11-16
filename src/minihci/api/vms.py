@@ -4,7 +4,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,8 @@ from minihci.api.deps import get_session
 from minihci.api.idempotency import fingerprint, run_idempotent
 from minihci.models import Host, Task, Vm
 from minihci.paths import resolve_image
+from minihci.scheduler.config import load_config
+from minihci.scheduler.placement import PLACEABLE_STATUSES, NoCapacity, place
 from minihci.tasks.engine import enqueue
 
 log = logging.getLogger("minihci.api")
@@ -20,10 +22,28 @@ router = APIRouter()
 
 class VmIn(BaseModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
-    host_id: int
+    host_id: int | None = None
     vcpus: int = Field(ge=1)
     mem_mb: int = Field(ge=64)
     image: str = Field(min_length=1)
+
+
+def _auto_place(s: Session, body: VmIn) -> Host:
+    """Pick a host for a VM with no host_id (D-022). Serialised so two creates cannot take the last slot."""
+    s.execute(text("SELECT pg_advisory_xact_lock(3, 0)"))
+    hosts = list(
+        s.scalars(select(Host).where(Host.status.in_(PLACEABLE_STATUSES)).order_by(Host.id).with_for_update(read=True))
+    )
+    rows = s.execute(
+        select(Vm.host_id, func.sum(Vm.vcpus), func.sum(Vm.mem_mb))
+        .where(Vm.desired_state != "absent")
+        .group_by(Vm.host_id)
+    )
+    usage = {hid: (int(cpu), int(mem)) for hid, cpu, mem in rows}
+    try:
+        return place(body, hosts, usage, load_config(s))
+    except NoCapacity:
+        raise HTTPException(409, "no host has capacity for this vm") from None
 
 
 @router.post("/vms", status_code=202)
@@ -40,16 +60,18 @@ def create_vm(
 
     def create(s: Session):
         # Runs only on an idempotency-key miss, so a replay never trips the name check below.
-        host = s.scalars(select(Host).where(Host.id == body.host_id).with_for_update(read=True)).first()
-        if host is None:
-            raise HTTPException(404, "host not found")
-        if host.status != "ready":
-            raise HTTPException(409, f"host is not ready (status={host.status})")
+        if body.host_id is not None:
+            host = s.scalars(select(Host).where(Host.id == body.host_id).with_for_update(read=True)).first()
+            if host is None:
+                raise HTTPException(404, "host not found")
+            if host.status != "ready":
+                raise HTTPException(409, f"host is not ready (status={host.status})")
+        host = _auto_place(s, body) if body.host_id is None else host
         if s.scalars(select(Vm).where(Vm.name == body.name, Vm.desired_state != "absent")).first() is not None:
             raise HTTPException(409, "vm name already exists")
         vm = Vm(
             name=body.name,
-            host_id=body.host_id,
+            host_id=host.id,
             vcpus=body.vcpus,
             mem_mb=body.mem_mb,
             image=body.image,

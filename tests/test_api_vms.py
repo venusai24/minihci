@@ -108,3 +108,67 @@ def test_get_vm_fields(client, session_factory, driver, host_id):
     body = client.get(f"/vms/{vm}").json()
     assert body == client.get("/vms").json()[0]
     assert body["name"] == "web1" and body["host_id"] == host_id and body["actual_state"] == "running"
+
+
+# --- auto placement (Q06.3, FR-3.2, D-022) ---
+
+
+def _add_host(session_factory, name, cpu, mem, status="ready"):
+    from minihci.models import Host
+
+    with session_factory() as s:
+        h = Host(name=name, libvirt_uri=f"qemu+ssh://{name}/system", status=status, cpu_total=cpu, mem_total_mb=mem)
+        s.add(h)
+        s.commit()
+        return h.id
+
+
+def _auto_body(**kw):
+    return {"name": "auto1", "vcpus": 1, "mem_mb": 512, "image": "/srv/minihci/base/alpine.qcow2"} | kw
+
+
+def _counts(session_factory):
+    from sqlalchemy import func, select
+
+    from minihci.models import Task
+
+    with session_factory() as s:
+        return s.scalar(select(func.count()).select_from(Vm)), s.scalar(select(func.count()).select_from(Task))
+
+
+def test_auto_place_best_fit(client, session_factory):
+    _add_host(session_factory, "big", 8, 16384)
+    small = _add_host(session_factory, "small", 8, 1024)
+    r = client.post("/vms", json=_auto_body())
+    assert r.status_code == 202
+    assert client.get("/vms").json()[0]["host_id"] == small
+    # second VM no longer fits on small (512 left, needs 600): goes to big
+    r = client.post("/vms", json=_auto_body(name="auto2", mem_mb=600))
+    assert r.status_code == 202
+    assert client.get("/vms").json()[1]["host_id"] != small
+
+
+def test_auto_place_no_capacity_409_no_rows(client, session_factory):
+    _add_host(session_factory, "tiny", 8, 256)
+    _add_host(session_factory, "down", 8, 16384, status="failed")
+    r = client.post("/vms", json=_auto_body())
+    assert r.status_code == 409
+    assert _counts(session_factory) == (0, 0)
+
+
+def test_explicit_host_id_unchanged(client, session_factory):
+    tiny = _add_host(session_factory, "tiny", 8, 256)  # would not fit; explicit skips capacity check
+    r = client.post("/vms", json=_auto_body(host_id=tiny))
+    assert r.status_code == 202
+    assert client.get("/vms").json()[0]["host_id"] == tiny
+
+
+def test_auto_place_replay_same_task(client, session_factory):
+    _add_host(session_factory, "a", 8, 16384)
+    h = {"Idempotency-Key": "auto-k"}
+    a = client.post("/vms", json=_auto_body(), headers=h)
+    b = client.post("/vms", json=_auto_body(), headers=h)
+    assert a.status_code == b.status_code == 202
+    assert b.json()["task_id"] == a.json()["task_id"]
+    assert b.headers["Idempotent-Replayed"] == "true"
+    assert _counts(session_factory) == (1, 1)
