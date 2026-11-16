@@ -399,3 +399,11 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   All `PUT /scheduler/config` body fields are optional. A body that sets no field (`{}` or all null)
   returns 422. The task params hold only the keys that were sent, and `scheduler.config_set` updates
   only those columns.
+- **Lock order (Q09.3 review):** Any transaction that takes more than one of these locks takes them in
+  this order: (1) the `vms` row `FOR UPDATE`, (2) `pg_advisory_xact_lock(3,0)`, (3) `hosts` rows
+  `FOR SHARE`. `POST /vms/{id}/migrate` already does this. The rebalancer's enqueue transaction does the
+  same: lock the VM row, re-check the VM and its open delete/migrate tasks, then take the advisory lock,
+  then re-check "no `vm.migrate` pending/running", then lock dst and run `fits`. Paths that take only
+  (2)+(3), such as `_auto_place` and `vm.migrate` `check_destination`, are compatible. `check_destination`
+  takes a FK key-share on the VM row after (2). That is safe because a caller that holds (1) on that VM
+  sees its open migrate task and exits before it asks for (2).
