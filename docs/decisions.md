@@ -347,8 +347,12 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
      numbers NULL and log `migration_unmeasured`. Any other combination → raise.
   3. `switch_host`: `vms.host_id = dst` (idempotent).
   4. `finish`: row `succeeded`, `finished_at`.
-  `on_rolled_back` checks where the domain really is and sets `vms.host_id` to match. If it is still on src,
-  the row becomes `failed`. The API checks up front and returns 409 for: VM not running, an open
+  `on_rolled_back` (`sync_host`) checks where the domain really is and closes a still-`running` row
+  (amended by Q08.7): dst only → `vms.host_id = dst`, row `succeeded`; src only → `vms.host_id = src`, row
+  `failed`; on both or neither → `vms.host_id` unchanged, row `failed`, warning event
+  `migrate_placement_ambiguous` (on_src, on_dst). Any change to `vms.host_id` logs `migrate_host_drift`
+  (task_id, vm_id, expected, observed). So a task can end `rolled_back` while its migrations row is
+  `succeeded`: the migration really happened, a later step failed. The API checks up front and returns 409 for: VM not running, an open
   `vm.delete`/`vm.migrate` task, dst equal to the current host, dst not placeable, or no capacity
   (same lock (3,0)).
 - **Consequences:** A failed migration leaves the VM on src and the DB consistent. A crash right after

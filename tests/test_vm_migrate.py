@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy import select
 
-from minihci.driver.base import DomainState
+from minihci.driver.base import DomainSpec, DomainState
 from minihci.driver.fake import FakeDriver
 from minihci.models import Host, Migration, Task, Vm
 from minihci.tasks.engine import enqueue
@@ -113,3 +113,75 @@ def test_source_stopped(session_factory, driver, host_id, dst_id):
     assert driver.domain_state(URI, "web1") == DomainState.SHUT_OFF
     assert host_of(session_factory, vm) == host_id
     assert_db_matches_driver(session_factory, driver)
+
+
+def _sync(session_factory, driver, vm, src, dst, caplog):
+    import logging
+
+    from minihci.tasks.executor import StepContext
+    from minihci.tasks.types.vm_migrate import sync_host
+
+    with session_factory() as s, s.begin():
+        tid = enqueue(s, "vm.migrate", vm, {"src_host_id": src, "dst_host_id": dst}).id
+        s.add(Migration(task_id=tid, vm_id=vm, src_host_id=src, dst_host_id=dst))
+    ctx = StepContext(
+        task_id=tid,
+        target_id=vm,
+        params={"src_host_id": src, "dst_host_id": dst},
+        driver=driver,
+        session_factory=session_factory,
+        settings=None,
+        log=logging.getLogger("minihci.tasks"),
+    )
+    with caplog.at_level(logging.WARNING, logger="minihci.tasks"):
+        sync_host(ctx)
+    return tid
+
+
+def _events(caplog, name):
+    return [r for r in caplog.records if getattr(r, "fields", {}).get("event") == name]
+
+
+def test_sync_host_domain_on_destination_only(session_factory, driver, host_id, dst_id, caplog):
+    vm = make_vm(session_factory, driver, host_id)
+    driver.migrate_live(URI, URI_B, "web1")
+    tid = _sync(session_factory, driver, vm, host_id, dst_id, caplog)
+    row = migration_row(session_factory, tid)
+    assert row.status == "succeeded" and row.finished_at is not None
+    assert host_of(session_factory, vm) == dst_id
+    assert len(_events(caplog, "migrate_host_drift")) == 1
+
+
+def test_sync_host_domain_on_both(session_factory, driver, host_id, dst_id, caplog):
+    vm = make_vm(session_factory, driver, host_id)
+    driver.define_domain(URI_B, DomainSpec(name="web1", vcpus=1, mem_mb=512, disk_path="/d/web1.qcow2"))
+    tid = _sync(session_factory, driver, vm, host_id, dst_id, caplog)
+    row = migration_row(session_factory, tid)
+    assert row.status == "failed" and row.finished_at is not None
+    assert host_of(session_factory, vm) == host_id
+    (ev,) = _events(caplog, "migrate_placement_ambiguous")
+    assert (ev.fields["on_src"], ev.fields["on_dst"]) == (True, True)
+    assert not _events(caplog, "migrate_host_drift")
+
+
+def test_sync_host_domain_on_neither(session_factory, driver, host_id, dst_id, caplog):
+    vm = make_vm(session_factory, driver, host_id)
+    driver.destroy_domain(URI, "web1")
+    driver.undefine_domain(URI, "web1")
+    tid = _sync(session_factory, driver, vm, host_id, dst_id, caplog)
+    row = migration_row(session_factory, tid)
+    assert row.status == "failed" and row.finished_at is not None
+    assert host_of(session_factory, vm) == host_id
+    (ev,) = _events(caplog, "migrate_placement_ambiguous")
+    assert (ev.fields["on_src"], ev.fields["on_dst"]) == (False, False)
+    assert not _events(caplog, "migrate_host_drift")
+
+
+def test_sync_host_domain_on_source_only(session_factory, driver, host_id, dst_id, caplog):
+    vm = make_vm(session_factory, driver, host_id)
+    tid = _sync(session_factory, driver, vm, host_id, dst_id, caplog)
+    row = migration_row(session_factory, tid)
+    assert row.status == "failed" and row.finished_at is not None
+    assert host_of(session_factory, vm) == host_id
+    assert not _events(caplog, "migrate_host_drift")
+    assert not _events(caplog, "migrate_placement_ambiguous")

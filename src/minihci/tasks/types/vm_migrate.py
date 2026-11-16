@@ -84,20 +84,49 @@ def finish(ctx: StepContext) -> None:
 
 
 def sync_host(ctx: StepContext) -> None:
-    """Point vms.host_id at the host that really has the domain; fail the migrations row if it stayed on src."""
+    """Point vms.host_id at the host that really has the domain; close the running migrations row (succeeded only if the domain is on dst)."""
     name, src, dst = _hosts(ctx)
     on_src = ctx.driver.domain_state(src, name) is not None
     on_dst = ctx.driver.domain_state(dst, name) is not None
     with ctx.session_factory() as s, s.begin():
         vm = s.get(Vm, ctx.target_id)
+        real, outcome = vm.host_id, "failed"
         if on_dst and not on_src:
-            vm.host_id = ctx.params["dst_host_id"]
+            real, outcome = ctx.params["dst_host_id"], "succeeded"
         elif on_src and not on_dst:
-            vm.host_id = ctx.params["src_host_id"]
-            row = s.scalars(select(Migration).where(Migration.task_id == ctx.task_id)).one_or_none()
-            if row is not None and row.status == "running":
-                row.status = "failed"
-                row.finished_at = func.now()
+            real = ctx.params["src_host_id"]
+        else:
+            # On both hosts or on neither: do not guess a host, but never leave the row running.
+            ctx.log.warning(
+                "migration placement ambiguous",
+                extra={
+                    "fields": {
+                        "event": "migrate_placement_ambiguous",
+                        "task_id": ctx.task_id,
+                        "vm_id": ctx.target_id,
+                        "on_src": on_src,
+                        "on_dst": on_dst,
+                    }
+                },
+            )
+        if vm.host_id != real:
+            ctx.log.warning(
+                "migration host drift",
+                extra={
+                    "fields": {
+                        "event": "migrate_host_drift",
+                        "task_id": ctx.task_id,
+                        "vm_id": ctx.target_id,
+                        "expected": vm.host_id,
+                        "observed": real,
+                    }
+                },
+            )
+            vm.host_id = real
+        row = s.scalars(select(Migration).where(Migration.task_id == ctx.task_id)).one_or_none()
+        if row is not None and row.status == "running":
+            row.status = outcome
+            row.finished_at = func.now()
 
 
 VM_MIGRATE = register(
