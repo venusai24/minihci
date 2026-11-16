@@ -24,7 +24,9 @@ class Base(DeclarativeBase):
 class Host(Base):
     __tablename__ = "hosts"
     __table_args__ = (
-        CheckConstraint("status in ('registering','ready','failed','removing','removed')", name="ck_hosts_status"),
+        CheckConstraint(
+            "status in ('registering','ready','suspect','dead','failed','removing','removed')", name="ck_hosts_status"
+        ),
         Index("uq_hosts_name_live", "name", unique=True, postgresql_where=text("status <> 'removed'")),
         Index("uq_hosts_uri_live", "libvirt_uri", unique=True, postgresql_where=text("status <> 'removed'")),
     )
@@ -36,6 +38,7 @@ class Host(Base):
     mem_total_mb: Mapped[int | None]
     status: Mapped[str] = mapped_column(default="registering", server_default="registering")
     last_heartbeat: Mapped[datetime | None]
+    missed_heartbeats: Mapped[int] = mapped_column(default=0, server_default="0")
 
 
 class Vm(Base):

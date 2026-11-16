@@ -1,6 +1,6 @@
 import pytest
 from alembic import command
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
 from minihci.models import Host, HostMetric, Migration, Task, Vm
@@ -220,3 +220,37 @@ def test_downgrade_to_0006_drops_migrations(engine):
     finally:
         command.upgrade(cfg, "head")
     assert "migrations" in inspect(engine).get_table_names()
+
+
+def test_host_suspect_dead_accepted_and_missed_heartbeats_default(session_factory):
+    with session_factory() as s:
+        s.add_all([_host("a", status="suspect"), _host("b", status="dead")])
+        s.commit()
+        assert [h.missed_heartbeats for h in s.scalars(select(Host).order_by(Host.name))] == [0, 0]
+
+
+def test_downgrade_to_0008_drops_missed_heartbeats_and_maps_suspect_dead_to_failed(engine):
+    cfg = alembic_config(TEST_DB_URL)
+    command.upgrade(cfg, "head")
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE hosts CASCADE"))
+    with engine.begin() as c:
+        for name, status in [("h-suspect", "suspect"), ("h-dead", "dead"), ("h-ready", "ready")]:
+            c.execute(
+                text(
+                    "insert into hosts (name, libvirt_uri, status, cpu_total, mem_total_mb) "
+                    "values (:n, :u, :s, 8, 16384)"
+                ),
+                {"n": name, "u": f"qemu+ssh://{name}/system", "s": status},
+            )
+    try:
+        command.downgrade(cfg, "0008")
+        assert "missed_heartbeats" not in {c["name"] for c in inspect(engine).get_columns("hosts")}
+        with engine.connect() as c:
+            got = dict(c.execute(text("select name, status from hosts")).all())
+        assert got == {"h-suspect": "failed", "h-dead": "failed", "h-ready": "ready"}
+    finally:
+        command.upgrade(cfg, "head")
+        with engine.begin() as c:
+            c.execute(text("TRUNCATE hosts CASCADE"))
+    assert "missed_heartbeats" in {c["name"] for c in inspect(engine).get_columns("hosts")}

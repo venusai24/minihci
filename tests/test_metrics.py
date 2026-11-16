@@ -203,3 +203,21 @@ def test_metrics_migration_histograms_independent_nulls(session_factory):
     assert d["count"] == 1 and abs(d["sum"] - 0.5) < 1e-9 and d["0.5"] == 1
     w = _hist(text, "minihci_migration_downtime_seconds")
     assert w["count"] == 0 and w["sum"] == 0
+
+
+def test_metrics_suspect_dead_and_missed_heartbeats(session_factory):
+    from minihci.models import Host
+
+    with session_factory() as s:
+        s.add(Host(name="a", libvirt_uri="u://a", status="suspect", missed_heartbeats=4))
+        s.add(Host(name="b", libvirt_uri="u://b", status="dead", missed_heartbeats=9))
+        s.add(Host(name="c", libvirt_uri="u://c", status="ready"))
+        s.commit()
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    text = client.get("/metrics").text
+    st = _samples(text, "minihci_host_status")
+    assert st[(("host", "a"), ("status", "suspect"))] == 1
+    assert st[(("host", "a"), ("status", "dead"))] == 0
+    assert st[(("host", "b"), ("status", "dead"))] == 1
+    m = _samples(text, "minihci_host_missed_heartbeats")
+    assert m == {(("host", "a"),): 4, (("host", "b"),): 9, (("host", "c"),): 0}

@@ -14,7 +14,7 @@ router = APIRouter()
 BUCKETS = (0.1, 0.5, 1.0, 5.0, 15.0, 60.0, 300.0)
 MIGRATION_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0)
 FINISHED_STATES = ("succeeded", "failed", "rolled_back")
-HOST_STATUSES = ("registering", "ready", "failed", "removing")
+HOST_STATUSES = ("registering", "ready", "suspect", "dead", "failed", "removing")
 
 
 class DbCollector:
@@ -59,13 +59,17 @@ class DbCollector:
     def _hosts(self) -> Iterator[Metric]:
         with self._sf() as s:
             rows = s.execute(
-                select(Host.name, Host.status, Host.last_heartbeat).where(Host.status != "removed").order_by(Host.name)
+                select(Host.name, Host.status, Host.last_heartbeat, Host.missed_heartbeats)
+                .where(Host.status != "removed")
+                .order_by(Host.name)
             ).all()
         st = GaugeMetricFamily("minihci_host_status", "Host status (one-hot)", labels=["host", "status"])
         hb = GaugeMetricFamily(
             "minihci_host_last_heartbeat_timestamp_seconds", "Last host heartbeat (unix time)", labels=["host"]
         )
-        for name, status, beat in rows:
+        missed = GaugeMetricFamily("minihci_host_missed_heartbeats", "Consecutive missed heartbeats", labels=["host"])
+        for name, status, beat, misses in rows:
+            missed.add_metric([name], misses)
             for known in HOST_STATUSES:
                 st.add_metric([name, known], 1.0 if status == known else 0.0)
             if beat is not None:
@@ -74,6 +78,7 @@ class DbCollector:
                 hb.add_metric([name], beat.timestamp())
         yield st
         yield hb
+        yield missed
 
     def _task_durations(self) -> HistogramMetricFamily:
         with self._sf() as s:
