@@ -1,7 +1,18 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, UniqueConstraint, func, text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    false,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, REAL
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -76,10 +87,19 @@ class SchedulerConfig(Base):
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_scheduler_config_single_row"),
         CheckConstraint("cpu_headroom_pct between 1 and 100", name="ck_scheduler_config_headroom"),
+        CheckConstraint("rebalance_cpu_threshold_pct between 1 and 100", name="ck_scheduler_config_rb_threshold"),
+        CheckConstraint("rebalance_window_s >= 30", name="ck_scheduler_config_rb_window"),
+        CheckConstraint("rebalance_vm_cooldown_s >= 0", name="ck_scheduler_config_rb_vm_cd"),
+        CheckConstraint("rebalance_host_cooldown_s >= 0", name="ck_scheduler_config_rb_host_cd"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     cpu_headroom_pct: Mapped[int] = mapped_column(default=80, server_default="80")
+    rebalance_enabled: Mapped[bool] = mapped_column(default=False, server_default=false())
+    rebalance_cpu_threshold_pct: Mapped[int] = mapped_column(default=80, server_default="80")
+    rebalance_window_s: Mapped[int] = mapped_column(default=300, server_default="300")
+    rebalance_vm_cooldown_s: Mapped[int] = mapped_column(default=1800, server_default="1800")
+    rebalance_host_cooldown_s: Mapped[int] = mapped_column(default=600, server_default="600")
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 

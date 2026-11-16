@@ -395,3 +395,7 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
 - **How to undo:** Stop the `rebalancer` thread and drop revision 0008 (or keep
   `rebalance_enabled=false`). For a better VM choice, collect per-VM CPU (`domain.getCPUStats`) and
   replace the share estimate.
+- **Clarification (Q09.1 review):** "Partial update" covers every field, `cpu_headroom_pct` included.
+  All `PUT /scheduler/config` body fields are optional. A body that sets no field (`{}` or all null)
+  returns 422. The task params hold only the keys that were sent, and `scheduler.config_set` updates
+  only those columns.

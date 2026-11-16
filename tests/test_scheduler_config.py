@@ -60,3 +60,39 @@ def test_checks_reject_bad_rows(engine, session_factory, sql):
 def test_downgrade_to_0004_drops_table(engine, cfg):
     command.downgrade(cfg, "0004")
     assert "scheduler_config" not in inspect(engine).get_table_names()
+
+
+def test_0008_defaults_and_checks(engine, cfg):
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE scheduler_config"))
+        c.execute(text("INSERT INTO scheduler_config (id, cpu_headroom_pct) VALUES (1, 80)"))
+    command.downgrade(cfg, "0007")
+    command.upgrade(cfg, "head")
+    with engine.connect() as c:
+        row = c.execute(
+            text(
+                "SELECT rebalance_enabled, rebalance_cpu_threshold_pct, rebalance_window_s, "
+                "rebalance_vm_cooldown_s, rebalance_host_cooldown_s FROM scheduler_config"
+            )
+        ).one()
+    assert tuple(row) == (False, 80, 300, 1800, 600)
+    for col, bad in [
+        ("rebalance_cpu_threshold_pct", 0),
+        ("rebalance_cpu_threshold_pct", 101),
+        ("rebalance_window_s", 29),
+        ("rebalance_vm_cooldown_s", -1),
+        ("rebalance_host_cooldown_s", -1),
+    ]:
+        with pytest.raises(IntegrityError), engine.begin() as c:
+            c.execute(text(f"UPDATE scheduler_config SET {col} = {bad}"))
+
+
+def test_0008_down_removes_columns(engine, cfg):
+    command.downgrade(cfg, "0007")
+    cols = {c["name"] for c in inspect(engine).get_columns("scheduler_config")}
+    assert "rebalance_enabled" not in cols and "cpu_headroom_pct" in cols
+
+
+def test_load_config_defaults_rebalance_disabled(session_factory):
+    with session_factory() as s:
+        assert load_config(s).rebalance_enabled is False

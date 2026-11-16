@@ -1,11 +1,12 @@
 """Scheduler configuration API (FR-3.2, D-022)."""
 
 import logging
+from dataclasses import asdict
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from minihci.api.deps import get_session
@@ -18,12 +19,23 @@ router = APIRouter()
 
 
 class SchedulerConfigIn(BaseModel):
-    cpu_headroom_pct: int = Field(ge=1, le=100)
+    cpu_headroom_pct: int | None = Field(default=None, ge=1, le=100)
+    rebalance_enabled: bool | None = None
+    rebalance_cpu_threshold_pct: int | None = Field(default=None, ge=1, le=100)
+    rebalance_window_s: int | None = Field(default=None, ge=30)
+    rebalance_vm_cooldown_s: int | None = Field(default=None, ge=0)
+    rebalance_host_cooldown_s: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "SchedulerConfigIn":
+        if not self.model_dump(exclude_none=True):
+            raise ValueError("at least one config field is required")
+        return self
 
 
 @router.get("/scheduler/config")
-def get_scheduler_config(session: Session = Depends(get_session)) -> dict[str, int]:
-    return {"cpu_headroom_pct": load_config(session).cpu_headroom_pct}
+def get_scheduler_config(session: Session = Depends(get_session)) -> dict[str, int | bool]:
+    return asdict(load_config(session))
 
 
 @router.put("/scheduler/config", status_code=202)
@@ -33,12 +45,12 @@ def put_scheduler_config(
     idempotency_key: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     def create(s: Session):
-        return enqueue(s, "scheduler.config_set", 1, {"cpu_headroom_pct": body.cpu_headroom_pct})
+        return enqueue(s, "scheduler.config_set", 1, body.model_dump(exclude_none=True))
 
     task, created = run_idempotent(
         request.app.state.session_factory,
         idempotency_key,
-        fingerprint({"op": "scheduler.config_set", **body.model_dump()}),
+        fingerprint({"op": "scheduler.config_set", **body.model_dump(exclude_none=True)}),
         create,
     )
     headers = {"Location": f"/tasks/{task.id}"}
