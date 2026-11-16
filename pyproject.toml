@@ -12,6 +12,9 @@ dependencies = [
     "prometheus-client>=0.26.0",
 ]
 
+[project.optional-dependencies]
+libvirt = ["libvirt-python"]
+
 [dependency-groups]
 dev = [
     "pytest",
