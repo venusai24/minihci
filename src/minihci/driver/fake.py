@@ -17,6 +17,7 @@ from minihci.driver.base import (
     DomainState,
     DriverError,
     HostInfo,
+    HostStats,
     HostUnreachable,
 )
 
@@ -84,6 +85,12 @@ class FakeDriver:
         with self._locked() as state:
             state["hosts"][uri] = {"cpu_total": cpu_total, "mem_total_mb": mem_total_mb, "domains": {}}
 
+    def set_load(self, uri: str, cpu_pct: float, mem_used_mb: int | None = None) -> None:
+        if not 0 <= cpu_pct <= 100:
+            raise ValueError(f"cpu_pct out of range 0..100: {cpu_pct}")
+        with self._locked() as state:
+            self._host(state, uri)["load"] = {"cpu_pct": cpu_pct, "mem_used_mb": mem_used_mb}
+
     # ---- HostDriver -----------------------------------------------------
     def probe_host(self, uri: str) -> HostInfo:
         def fn(state: dict[str, Any]) -> HostInfo:
@@ -91,6 +98,17 @@ class FakeDriver:
             return HostInfo(cpu_total=h["cpu_total"], mem_total_mb=h["mem_total_mb"])
 
         return self._call("probe_host", fn)
+
+    def host_stats(self, uri: str) -> HostStats:
+        def fn(state: dict[str, Any]) -> HostStats:
+            h = self._host(state, uri)
+            load = h.get("load") or {}
+            mem = load.get("mem_used_mb")
+            if mem is None:
+                mem = sum(d["mem_mb"] for d in h["domains"].values() if d["state"] == DomainState.RUNNING.value)
+            return HostStats(cpu_pct=float(load.get("cpu_pct", 0.0)), mem_used_mb=int(mem))
+
+        return self._call("host_stats", fn)
 
     def list_domains(self, uri: str) -> dict[str, DomainState]:
         def fn(state: dict[str, Any]) -> dict[str, DomainState]:

@@ -22,6 +22,12 @@ class HostInfo:
 
 
 @dataclass(frozen=True)
+class HostStats:
+    cpu_pct: float  # host-wide busy CPU, 0..100
+    mem_used_mb: int
+
+
+@dataclass(frozen=True)
 class DomainSpec:
     name: str
     vcpus: int
@@ -37,6 +43,7 @@ class DomainState(StrEnum):
 @runtime_checkable
 class HostDriver(Protocol):
     def probe_host(self, uri: str) -> HostInfo: ...
+    def host_stats(self, uri: str) -> HostStats: ...  # HostUnreachable if unknown/down
     def list_domains(self, uri: str) -> dict[str, DomainState]: ...
     def domain_state(self, uri: str, name: str) -> DomainState | None: ...  # None = not defined
     def define_domain(self, uri: str, spec: DomainSpec) -> None: ...  # DomainExists if defined

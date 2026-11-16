@@ -13,6 +13,7 @@ from minihci.driver.base import (
     DriverError,
     HostDriver,
     HostInfo,
+    HostStats,
     HostUnreachable,
 )
 from minihci.driver.fake import FakeDriver
@@ -158,3 +159,51 @@ def test_shutdown_and_reboot_use_call_hooks(drv):
     with pytest.raises(DriverError, match="injected"):
         drv.reboot_domain(URI, "vm1")
     assert drv.domain_state(URI, "vm1") == DomainState.RUNNING
+
+
+def test_host_stats_default_from_running_domains(drv):
+    assert drv.host_stats(URI) == HostStats(cpu_pct=0.0, mem_used_mb=0)
+    drv.define_domain(URI, SPEC)
+    assert drv.host_stats(URI).mem_used_mb == 0
+    drv.start_domain(URI, "vm1")
+    assert drv.host_stats(URI) == HostStats(cpu_pct=0.0, mem_used_mb=512)
+
+
+def test_set_load_round_trip(drv):
+    drv.set_load(URI, 55.5, 2048)
+    assert drv.host_stats(URI) == HostStats(cpu_pct=55.5, mem_used_mb=2048)
+
+
+def test_set_load_without_mem_uses_running_domains(drv):
+    drv.define_domain(URI, SPEC)
+    drv.start_domain(URI, "vm1")
+    drv.set_load(URI, 40)
+    assert drv.host_stats(URI) == HostStats(cpu_pct=40.0, mem_used_mb=512)
+
+
+def test_set_load_file_backed_shared(tmp_path):
+    f = tmp_path / "state.json"
+    a = FakeDriver(state_file=f)
+    a.add_host(URI, cpu_total=8, mem_total_mb=16384)
+    a.set_load(URI, 77, 1000)
+    assert FakeDriver(state_file=f).host_stats(URI) == HostStats(cpu_pct=77, mem_used_mb=1000)
+
+
+def test_host_stats_unknown_uri(drv):
+    with pytest.raises(HostUnreachable):
+        drv.host_stats("qemu+ssh://nope/system")
+    with pytest.raises(HostUnreachable):
+        drv.set_load("qemu+ssh://nope/system", 10)
+
+
+def test_host_stats_injected_failure(drv):
+    drv.fail["host_stats"] = 1
+    with pytest.raises(DriverError):
+        drv.host_stats(URI)
+    assert drv.host_stats(URI).cpu_pct == 0.0
+
+
+@pytest.mark.parametrize("bad", [-0.1, 100.1])
+def test_set_load_out_of_range(drv, bad):
+    with pytest.raises(ValueError):
+        drv.set_load(URI, bad)
