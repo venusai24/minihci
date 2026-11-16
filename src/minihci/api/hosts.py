@@ -98,3 +98,17 @@ def list_hosts(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
         }
         for h in session.scalars(select(Host).where(Host.status != "removed").order_by(Host.id))
     ]
+
+
+@router.get("/hosts/{host_id}/health")
+def host_health(host_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    h = session.get(Host, host_id)
+    if h is None or h.status == "removed":
+        raise HTTPException(404, "host not found")
+    beat = h.last_heartbeat  # naive-UTC column
+    return {
+        "host_id": h.id,
+        "status": h.status,
+        "last_heartbeat": beat.strftime("%Y-%m-%dT%H:%M:%S.%fZ").replace(".000000Z", "Z") if beat else None,
+        "missed_heartbeats": h.missed_heartbeats,
+    }

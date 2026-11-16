@@ -203,3 +203,52 @@ def test_reregister_same_name_and_uri_after_removal(client, session_factory):
     r = client.post("/hosts", json={"name": "a", "libvirt_uri": URI})
     assert r.status_code == 202
     assert [h["status"] for h in client.get("/hosts").json()] == ["registering"]
+
+
+def test_health_unknown_host_404(client):
+    assert client.get("/hosts/999/health").status_code == 404
+
+
+def test_health_registering_host_has_no_heartbeat(client):
+    hid = client.post("/hosts", json={"name": "a", "libvirt_uri": URI}).json()["target_id"]
+    assert client.get(f"/hosts/{hid}/health").json() == {
+        "host_id": hid,
+        "status": "registering",
+        "last_heartbeat": None,
+        "missed_heartbeats": 0,
+    }
+
+
+def test_heartbeat_acceptance_suspect_dead_recovery_and_metrics(client, session_factory):
+    from datetime import UTC, datetime, timedelta
+
+    from minihci.ha.heartbeat import heartbeat_once
+
+    drv = FakeDriver()
+    drv.add_host(URI, 8, 16384)
+    hid = client.post("/hosts", json={"name": "a", "libvirt_uri": URI}).json()["target_id"]
+    drain(session_factory, drv)
+    s = Settings(heartbeat_suspect_misses=3, heartbeat_dead_after_s=30, heartbeat_ping_timeout_s=0.5)
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    heartbeat_once(session_factory, drv, s, now=t0)
+    h = client.get(f"/hosts/{hid}/health").json()
+    assert (h["status"], h["missed_heartbeats"], h["last_heartbeat"]) == ("ready", 0, "2026-01-01T00:00:00Z")
+
+    drv.power_off_host(URI)
+    for i in (1, 2, 3):
+        heartbeat_once(session_factory, drv, s, now=t0 + timedelta(seconds=5 * i))
+    h = client.get(f"/hosts/{hid}/health").json()
+    assert (h["status"], h["missed_heartbeats"]) == ("suspect", 3)
+    m = client.get("/metrics").text
+    assert 'minihci_host_status{host="a",status="suspect"} 1.0' in m
+    assert 'minihci_host_missed_heartbeats{host="a"} 3.0' in m
+
+    heartbeat_once(session_factory, drv, s, now=t0 + timedelta(seconds=31))
+    assert client.get(f"/hosts/{hid}/health").json()["status"] == "dead"
+    assert 'minihci_host_status{host="a",status="dead"} 1.0' in client.get("/metrics").text
+
+    drv.power_on_host(URI)
+    heartbeat_once(session_factory, drv, s, now=t0 + timedelta(seconds=40))
+    h = client.get(f"/hosts/{hid}/health").json()
+    assert (h["status"], h["missed_heartbeats"]) == ("ready", 0)
+    assert 'minihci_host_status{host="a",status="ready"} 1.0' in client.get("/metrics").text
