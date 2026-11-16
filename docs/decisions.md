@@ -361,3 +361,37 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   overcommit it. The rebalancer (Q09) will reuse `placement.fits` and enqueue `vm.migrate`.
 - **How to undo:** Drop the route, `tasks/types/vm_migrate.py`, revision 0007 and `migrate_live`. To
   reserve capacity, count the VMs of open `vm.migrate` tasks against dst in `usage`.
+
+## D-025 Rebalancer: DB-only pass, VM chosen by projected max load, cooldowns read from `tasks`
+- **Context:** FR-3.4 says: when a host stays above a configurable load threshold, choose a VM, migrate
+  it to the least-loaded host, and use a cooldown to avoid ping-pong. The PRD does not define "stays
+  above", how to choose the VM, the cooldown values, or where cooldown state lives. There are no per-VM
+  CPU stats, only host-wide `host_metrics.cpu_pct` (D-023).
+- **Decision:** Settings live in the `scheduler_config` row (revision 0008): `rebalance_enabled` (default
+  **false**), `rebalance_cpu_threshold_pct` 80, `rebalance_window_s` 300, `rebalance_vm_cooldown_s` 1800,
+  `rebalance_host_cooldown_s` 600. They change through `PUT /scheduler/config` (partial update, same task).
+  `scheduler/rebalance.py` runs as a `rebalancer` thread in the worker every `rebalance_interval_s` = 30 s.
+  It reads only the DB and never calls the driver. One pass:
+  1. Disabled, or any `vm.migrate` task pending/running → do nothing (at most one migration in flight).
+  2. Host load = the average `cpu_pct` over the last `rebalance_window_s` for hosts in `PLACEABLE_STATUSES`
+     that have **>= 2 samples** ("stays above", so one spike does not count). A host is hot if load > threshold.
+  3. VM choice: candidates are VMs on the hottest host with desired = actual = running and no VM cooldown.
+     A VM's load share is estimated from allocations: `share = src_load * vm.vcpus / sum(vcpus on src)`.
+     On dst it adds `share * src.cpu_total / dst.cpu_total`. For each candidate, dst = the least-loaded
+     host (with samples, not in host cooldown, below threshold) that passes `placement.fits` (usage
+     without this VM). Pick the move with the lowest projected max(src_after, dst_after). Ties go to the
+     smaller `mem_mb` (cheaper to migrate), then the lower VM id. If no move lowers the max below the
+     current src load → nothing.
+  4. Enqueue `vm.migrate` (params `src_host_id`, `dst_host_id`, `reason: "rebalance"`) in one transaction
+     under `pg_advisory_xact_lock(3,0)`, after re-checking the VM and `fits`, the same checks as the API.
+  Cooldowns need no new table. A VM cools down if it has a `vm.migrate` task created within the VM
+  cooldown. A host cools down if a `vm.migrate` task with that host as `src_host_id` or `dst_host_id` was
+  created within the host cooldown. Manual migrations count too.
+- **Consequences:** The rule is easy to explain and to table-test, and only one VM moves per pass. The
+  per-VM share is a guess based on vCPUs, so a busy 1-vCPU VM may be underestimated. Host cooldown
+  (10 min) is twice the window (5 min), so the metrics after a move settle before that host is judged
+  again. VM cooldown (30 min) stops a VM from bouncing between hosts. Default-off means a fresh install
+  never migrates on its own.
+- **How to undo:** Stop the `rebalancer` thread and drop revision 0008 (or keep
+  `rebalance_enabled=false`). For a better VM choice, collect per-VM CPU (`domain.getCPUStats`) and
+  replace the share estimate.
