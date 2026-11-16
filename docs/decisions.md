@@ -322,3 +322,38 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   at a 10 s interval.
 - **How to undo:** Drop the `collector` thread and revision 0006, then remove `host_stats` from the
   protocol and FakeDriver. For longer history, add a downsampled rollup table instead of raising retention.
+
+## D-024 Live migration: `vm.migrate` task with a `migrations` row, no undo, rollback syncs to where the domain is
+- **Context:** FR-3.1 wants a running VM live-migrated to a named host through the API. FR-3.5 wants
+  duration and downtime recorded for every migration, and Q05's `minihci_migration_*` histograms are
+  waiting for that data (D-021). The PRD lists table `migrations(id, vm_id, src_host, dst_host,
+  duration_ms, downtime_ms)` and says nothing about crash handling, capacity checks or what the fake does.
+  A crash can land between libvirt finishing the migration and us writing the numbers down.
+- **Decision:** New HostDriver method `migrate_live(src_uri, dst_uri, name) -> MigrationResult(duration_ms,
+  downtime_ms)`. It raises DomainNotFound if the domain is not on src, DriverError if it is not running or
+  dst already has that name, and HostUnreachable for an unknown host. On any error the domain stays on src.
+  FakeDriver moves the domain dict (state and boot_count kept) from src to dst inside `_call`, so
+  delay/fail injection works and failures happen before the effect. It returns the measured wall time as
+  `duration_ms` and a fixed `FAKE_DOWNTIME_MS = 30`. Q13's libvirt driver measures downtime by polling.
+  Table `migrations` (revision 0007): `id bigserial`, `task_id` FK tasks UNIQUE, `vm_id` FK vms,
+  `src_host_id`/`dst_host_id` FK hosts, `status` CHECK `running|succeeded|failed`, `started_at` default
+  now(), `finished_at`, `duration_ms`/`downtime_ms` int NULL CHECK >= 0.
+  Task `vm.migrate` (target_kind vm; params `src_host_id`, `dst_host_id`) has four steps and no undos:
+  1. `check_destination`: dst is in `PLACEABLE_STATUSES` and `placement.fits(vm, dst, usage excluding
+     this VM, config)` under `pg_advisory_xact_lock(3,0)`. It skips the check if the domain is already on
+     dst. It inserts the migrations row with `ON CONFLICT (task_id) DO NOTHING`.
+  2. `migrate`: read the domain state on both hosts. src running and dst None → `migrate_live`, then write
+     the numbers to the row. src None and dst running → already moved by a crashed attempt; leave the
+     numbers NULL and log `migration_unmeasured`. Any other combination → raise.
+  3. `switch_host`: `vms.host_id = dst` (idempotent).
+  4. `finish`: row `succeeded`, `finished_at`.
+  `on_rolled_back` checks where the domain really is and sets `vms.host_id` to match. If it is still on src,
+  the row becomes `failed`. The API checks up front and returns 409 for: VM not running, an open
+  `vm.delete`/`vm.migrate` task, dst equal to the current host, dst not placeable, or no capacity
+  (same lock (3,0)).
+- **Consequences:** A failed migration leaves the VM on src and the DB consistent. A crash right after
+  libvirt finishes still succeeds on retry, but that one migration has no timing, and metrics skip NULLs.
+  Capacity is checked, not reserved: a create that lands on dst between the check and `switch_host` can
+  overcommit it. The rebalancer (Q09) will reuse `placement.fits` and enqueue `vm.migrate`.
+- **How to undo:** Drop the route, `tasks/types/vm_migrate.py`, revision 0007 and `migrate_live`. To
+  reserve capacity, count the VMs of open `vm.migrate` tasks against dst in `usage`.
