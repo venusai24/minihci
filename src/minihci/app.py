@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import sessionmaker
 
-from minihci.api import hosts, metrics, tasks, vms
+from minihci.api import hosts, metrics, scheduler, tasks, vms
 from minihci.api.idempotency import IdempotencyConflict, InvalidIdempotencyKey
 from minihci.config import Settings
 from minihci.db import make_engine, make_session_factory
@@ -44,6 +44,7 @@ def create_app(
     app.include_router(tasks.router)
     app.include_router(vms.router)
     app.include_router(metrics.router)
+    app.include_router(scheduler.router)
 
     @app.exception_handler(IdempotencyConflict)
     def _conflict(_: Request, exc: IdempotencyConflict) -> JSONResponse:
