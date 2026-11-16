@@ -126,3 +126,48 @@ def test_metrics_migration_families_present_empty(session_factory):
         assert fams[name].type == "histogram"
         counts = [s.value for s in fams[name].samples if s.name.endswith("_count")]
         assert counts == [0]
+
+
+def _hist(text: str, family: str) -> dict[str, float]:
+    fams = {f.name: f for f in text_string_to_metric_families(text)}
+    out = {}
+    for s in fams[family].samples:
+        out[s.labels.get("le", s.name.rsplit("_", 1)[-1])] = s.value
+    return out
+
+
+def test_metrics_migration_histograms_filled(session_factory):
+    from minihci.models import Host, Migration, Task, Vm
+
+    rows = [("succeeded", 400, 30), ("succeeded", 3000, 150), ("succeeded", None, None), ("failed", 99000, 99000)]
+    with session_factory() as s:
+        h1 = Host(name="h1", libvirt_uri="u://1", status="ready")
+        h2 = Host(name="h2", libvirt_uri="u://2", status="ready")
+        s.add_all([h1, h2])
+        s.flush()
+        for i, (status, dur, down) in enumerate(rows):
+            vm = Vm(name=f"v{i}", host_id=h1.id, vcpus=1, mem_mb=128, image="i", disk_path=f"/d{i}")
+            t = Task(type="vm.migrate", target_id=i)
+            s.add_all([vm, t])
+            s.flush()
+            s.add(
+                Migration(
+                    task_id=t.id,
+                    vm_id=vm.id,
+                    src_host_id=h1.id,
+                    dst_host_id=h2.id,
+                    status=status,
+                    duration_ms=dur,
+                    downtime_ms=down,
+                )
+            )
+        s.commit()
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    text = client.get("/metrics").text
+    d = _hist(text, "minihci_migration_duration_seconds")
+    assert d["0.25"] == 0 and d["0.5"] == 1 and d["2.0"] == 1 and d["5.0"] == 2 and d["+Inf"] == 2
+    assert d["count"] == 2 and abs(d["sum"] - 3.4) < 1e-9
+    w = _hist(text, "minihci_migration_downtime_seconds")
+    assert w["0.05"] == 1
+    assert w["0.1"] == 1 and w["0.25"] == 2 and w["+Inf"] == 2
+    assert w["count"] == 2 and abs(w["sum"] - 0.18) < 1e-9

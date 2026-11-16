@@ -7,11 +7,12 @@ from prometheus_client.core import GaugeMetricFamily, HistogramMetricFamily, Met
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
-from minihci.models import Host, Task
+from minihci.models import Host, Migration, Task
 
 router = APIRouter()
 
 BUCKETS = (0.1, 0.5, 1.0, 5.0, 15.0, 60.0, 300.0)
+MIGRATION_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0)
 FINISHED_STATES = ("succeeded", "failed", "rolled_back")
 HOST_STATUSES = ("registering", "ready", "failed", "removing")
 
@@ -29,15 +30,27 @@ class DbCollector:
         yield g
         yield self._task_durations()
         yield from self._hosts()
-        # Q08 must fill these from the migrations table; empty until then.
-        yield self._empty_histogram("minihci_migration_duration_seconds", "Migration duration in seconds")
-        yield self._empty_histogram("minihci_migration_downtime_seconds", "Migration downtime in seconds")
+        yield from self._migrations()
 
-    @staticmethod
-    def _empty_histogram(name: str, doc: str) -> HistogramMetricFamily:
-        h = HistogramMetricFamily(name, doc)
-        h.add_metric([], [(str(float(b)), 0.0) for b in BUCKETS] + [("+Inf", 0.0)], 0.0)
-        return h
+    def _migrations(self) -> Iterator[Metric]:
+        with self._sf() as s:
+            rows = s.execute(
+                select(Migration.duration_ms, Migration.downtime_ms).where(
+                    Migration.status == "succeeded",
+                    Migration.duration_ms.is_not(None),
+                    Migration.downtime_ms.is_not(None),
+                )
+            ).all()
+        for idx, name, doc in (
+            (0, "minihci_migration_duration_seconds", "Migration duration in seconds"),
+            (1, "minihci_migration_downtime_seconds", "Migration downtime in seconds"),
+        ):
+            vals = [r[idx] / 1000.0 for r in rows]
+            h = HistogramMetricFamily(name, doc)
+            buckets = [(str(float(b)), float(sum(v <= b for v in vals))) for b in MIGRATION_BUCKETS]
+            buckets.append(("+Inf", float(len(vals))))
+            h.add_metric([], buckets, sum(vals))
+            yield h
 
     def _hosts(self) -> Iterator[Metric]:
         with self._sf() as s:
