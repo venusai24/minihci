@@ -13,7 +13,8 @@ from minihci.config import Settings
 from minihci.driver.base import HostDriver
 from minihci.ha.failover import failover_once
 from minihci.ha.health import next_health
-from minihci.models import Host
+from minihci.models import Host, Task
+from minihci.tasks.engine import enqueue
 
 log = logging.getLogger("minihci.heartbeat")
 
@@ -37,6 +38,21 @@ def _apply(session_factory: sessionmaker[Session], settings: Settings, host_id: 
         last = h.last_heartbeat.replace(tzinfo=UTC) if h.last_heartbeat is not None else None
         h.status, h.missed_heartbeats, new_last = next_health(h.status, h.missed_heartbeats, last, ok, now, settings)
         h.last_heartbeat = new_last.astimezone(UTC).replace(tzinfo=None) if new_last is not None else None
+        if ok and old == "dead":
+            # D-028 (5): stays dead until host.reclaim has removed stale copies (it sets ready)
+            h.status = "dead"
+            open_task = s.scalars(
+                select(Task.id).where(
+                    Task.type == "host.reclaim", Task.target_id == host_id, Task.state.in_(("pending", "running"))
+                )
+            ).first()
+            if open_task is None:
+                task = enqueue(s, "host.reclaim", host_id, {})
+                log.warning(
+                    "host reclaim enqueued",
+                    extra={"fields": {"event": "host_reclaim_enqueued", "host_id": host_id, "task_id": task.id}},
+                )
+            return
         if h.status != old:
             log.warning(
                 "host health changed",

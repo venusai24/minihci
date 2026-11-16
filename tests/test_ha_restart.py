@@ -143,6 +143,17 @@ def test_resume_fence_old_host_running(session_factory, driver, dead_id, surv_id
     assert driver.domain_state(URI, "web1") == DomainState.RUNNING
 
 
+def test_open_reclaim_on_old_host_fences_start(session_factory, driver, dead_id, surv_id):
+    vm = make_vm(session_factory, driver, dead_id)
+    driver.destroy_domain(URI, "web1")
+    set_status(session_factory, dead_id, "dead")
+    with session_factory() as s, s.begin():
+        enqueue(s, "host.reclaim", dead_id, {}).state = "running"  # open, but not claimable by the drain
+    t = restart(session_factory, driver, vm, dead_id)
+    assert t.state == "rolled_back" and "reclaim" in t.error
+    assert driver.domain_state(URI_B, "web1") != DomainState.RUNNING
+
+
 def test_old_host_answers_shut_off_goes_ahead(session_factory, driver, dead_id, surv_id):
     vm = make_vm(session_factory, driver, dead_id)
     driver.destroy_domain(URI, "web1")

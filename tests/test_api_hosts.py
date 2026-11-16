@@ -250,5 +250,8 @@ def test_heartbeat_acceptance_suspect_dead_recovery_and_metrics(client, session_
     drv.power_on_host(URI)
     heartbeat_once(session_factory, drv, s, now=t0 + timedelta(seconds=40))
     h = client.get(f"/hosts/{hid}/health").json()
+    assert (h["status"], h["missed_heartbeats"]) == ("dead", 0)  # D-028 (5): dead until host.reclaim ran
+    drain(session_factory, drv)
+    h = client.get(f"/hosts/{hid}/health").json()
     assert (h["status"], h["missed_heartbeats"]) == ("ready", 0)
     assert 'minihci_host_status{host="a",status="ready"} 1.0' in client.get("/metrics").text

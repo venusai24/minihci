@@ -8,7 +8,7 @@ from minihci.driver.fake import FakeDriver
 from minihci.ha import heartbeat
 from minihci.ha.heartbeat import heartbeat_once
 from minihci.models import Host
-from tests.helpers import add_ready_host
+from tests.helpers import add_ready_host, drain
 
 U1 = "qemu+ssh://a/system"
 U2 = "qemu+ssh://b/system"
@@ -41,7 +41,10 @@ def test_off_to_suspect_dead_and_back(session_factory):
     d.power_on_host(U1)
     heartbeat_once(session_factory, d, S, now=T0 + timedelta(seconds=40))
     row = get(session_factory, h)
-    assert (row.status, row.missed_heartbeats, row.last_heartbeat) == ("ready", 0, T0 + timedelta(seconds=40))
+    # D-028 (5): a returning dead host stays dead until host.reclaim has run
+    assert (row.status, row.missed_heartbeats, row.last_heartbeat) == ("dead", 0, T0 + timedelta(seconds=40))
+    drain(session_factory, d)
+    assert get(session_factory, h).status == "ready"
 
 
 def test_transition_logged(session_factory, caplog):

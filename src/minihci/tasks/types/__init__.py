@@ -1,4 +1,5 @@
 from minihci.tasks.types import (
+    host_reclaim,  # noqa: F401
     host_register,  # noqa: F401  (registers on import)
     host_remove,  # noqa: F401
     scheduler_config_set,  # noqa: F401

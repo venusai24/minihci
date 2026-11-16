@@ -4,7 +4,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from minihci.driver.base import DomainSpec, DomainState, HostUnreachable
-from minihci.models import HaRestart, Host, Vm
+from minihci.models import HaRestart, Host, Task, Vm
 from minihci.scheduler.config import load_config
 from minihci.scheduler.placement import NoCapacity, place
 from minihci.tasks.executor import Step, StepContext, TaskType
@@ -37,8 +37,15 @@ def _assert_fenced(ctx: StepContext, vm_name: str) -> None:
         s.execute(text("SELECT pg_advisory_xact_lock(:ns, 0)"), {"ns": LOCK_NAMESPACE["scheduler"]})
         old = s.get(Host, ctx.params["dead_host_id"])
         name, status, uri = old.name, old.status, old.libvirt_uri
+        reclaiming = s.scalars(
+            select(Task.id)
+            .where(Task.type == "host.reclaim", Task.target_id == old.id, Task.state.in_(("pending", "running")))
+            .limit(1)
+        ).first()
     if status != "dead":
         raise RuntimeError(f"host {name} is {status}, not dead; refusing to start a second copy of vm {vm_name}")
+    if reclaiming is not None:
+        raise RuntimeError(f"host {name} has an open host.reclaim; refusing to start a second copy of vm {vm_name}")
     try:
         if ctx.driver.domain_state(uri, vm_name) == DomainState.RUNNING:
             raise RuntimeError(f"vm {vm_name} is still running on host {name}; refusing to start a second copy")
