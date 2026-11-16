@@ -79,9 +79,12 @@ class FakeDriver:
     @staticmethod
     def _host(state: dict[str, Any], uri: str) -> dict[str, Any]:
         try:
-            return state["hosts"][uri]
+            h = state["hosts"][uri]
         except KeyError:
             raise HostUnreachable(f"host unreachable: {uri}") from None
+        if h.get("powered_off"):
+            raise HostUnreachable(f"host powered off: {uri}")
+        return h
 
     # ---- test helper (not part of the protocol) -------------------------
     def add_host(self, uri: str, cpu_total: int, mem_total_mb: int) -> None:
@@ -94,7 +97,30 @@ class FakeDriver:
         with self._locked() as state:
             self._host(state, uri)["load"] = {"cpu_pct": cpu_pct, "mem_used_mb": mem_used_mb}
 
+    def power_off_host(self, uri: str) -> None:
+        """Simulate a dead host: ping is False, every other op raises HostUnreachable. Domains are kept."""
+        with self._locked() as state:
+            self._raw_host(state, uri)["powered_off"] = True
+
+    def power_on_host(self, uri: str) -> None:
+        with self._locked() as state:
+            self._raw_host(state, uri)["powered_off"] = False
+
+    @staticmethod
+    def _raw_host(state: dict[str, Any], uri: str) -> dict[str, Any]:
+        try:
+            return state["hosts"][uri]
+        except KeyError:
+            raise HostUnreachable(f"host unreachable: {uri}") from None
+
     # ---- HostDriver -----------------------------------------------------
+    def ping(self, uri: str, timeout: float = 3) -> bool:
+        def fn(state: dict[str, Any]) -> bool:
+            h = state["hosts"].get(uri)
+            return h is not None and not h.get("powered_off")
+
+        return self._call("ping", fn)
+
     def probe_host(self, uri: str) -> HostInfo:
         def fn(state: dict[str, Any]) -> HostInfo:
             h = self._host(state, uri)

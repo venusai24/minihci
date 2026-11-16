@@ -288,3 +288,52 @@ def test_migrate_live_file_backed_visible_to_second_driver(tmp_path):
     a.migrate_live(URI, URI2, "vm1")
     assert b.domain_state(URI, "vm1") is None
     assert b.domain_state(URI2, "vm1") == DomainState.RUNNING
+
+
+def test_ping_up_unknown_and_powered_off(drv):
+    drv.add_host("h1", 4, 1024)
+    assert drv.ping("h1", 1) is True
+    assert drv.ping("nope", 1) is False
+    drv.power_off_host("h1")
+    assert drv.ping("h1", 1) is False
+    drv.power_on_host("h1")
+    assert drv.ping("h1", 1) is True
+
+
+def test_powered_off_host_raises_unreachable_keeps_domains(drv):
+    drv.add_host("h1", 4, 1024)
+    drv.define_domain("h1", DomainSpec(name="a", vcpus=1, mem_mb=64, disk_path="/d"))
+    drv.power_off_host("h1")
+    for call in (
+        lambda: drv.probe_host("h1"),
+        lambda: drv.host_stats("h1"),
+        lambda: drv.list_domains("h1"),
+        lambda: drv.domain_state("h1", "a"),
+        lambda: drv.start_domain("h1", "a"),
+    ):
+        with pytest.raises(HostUnreachable):
+            call()
+    drv.power_on_host("h1")
+    assert drv.domain_state("h1", "a") == DomainState.SHUT_OFF
+
+
+def test_power_state_persists_in_state_file(tmp_path):
+    a = FakeDriver(state_file=tmp_path / "s.json")
+    a.add_host("h1", 4, 1024)
+    a.power_off_host("h1")
+    b = FakeDriver(state_file=tmp_path / "s.json")
+    assert b.ping("h1") is False
+    b.power_on_host("h1")
+    assert a.ping("h1") is True
+
+
+def test_ping_honours_fail_and_delays(drv):
+    drv.add_host("h1", 4, 1024)
+    drv.fail["ping"] = 1
+    with pytest.raises(DriverError):
+        drv.ping("h1")
+    assert drv.ping("h1") is True
+    drv.delays["ping"] = 0.05
+    t = time.monotonic()
+    drv.ping("h1")
+    assert time.monotonic() - t >= 0.05

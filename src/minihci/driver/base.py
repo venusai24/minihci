@@ -48,6 +48,7 @@ class DomainState(StrEnum):
 
 @runtime_checkable
 class HostDriver(Protocol):
+    def ping(self, uri: str, timeout: float = 3) -> bool: ...  # True if the host answers within timeout
     def probe_host(self, uri: str) -> HostInfo: ...
     def host_stats(self, uri: str) -> HostStats: ...  # HostUnreachable if unknown/down
     def list_domains(self, uri: str) -> dict[str, DomainState]: ...

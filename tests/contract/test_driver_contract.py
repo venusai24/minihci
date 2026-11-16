@@ -154,3 +154,7 @@ def test_unknown_host_is_unreachable(env: Env):
         pytest.skip("real hosts: no known-bad host to use safely")
     with pytest.raises(HostUnreachable):
         env.driver.host_stats("fake://nope")
+
+
+def test_ping_known_host_true(env: Env):
+    assert env.driver.ping(env.uri1, 5) is True
