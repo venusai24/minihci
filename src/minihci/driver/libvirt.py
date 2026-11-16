@@ -9,10 +9,23 @@ from __future__ import annotations
 import contextlib
 import logging
 import threading
+import time
 from collections.abc import Callable
 from types import ModuleType
 
-from minihci.driver.libvirt_errors import load_libvirt
+from minihci.driver.base import (
+    DomainExists,
+    DomainNotFound,
+    DomainSpec,
+    DomainState,
+    DriverError,
+    HostInfo,
+    HostStats,
+    HostUnreachable,
+)
+from minihci.driver.libvirt_errors import load_libvirt, map_error
+from minihci.driver.libvirt_stats import cpu_pct, map_domain_state, mem_used_mb
+from minihci.driver.libvirt_xml import domain_xml
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +101,7 @@ class LibvirtConnections:
                     return conn
             except lib.libvirtError:
                 pass
-            self._evict(uri, conn)
+            self.evict(uri, conn)
         start_event_loop()
         new = lib.open(uri)  # may hang; never called under the lock
         try:
@@ -120,13 +133,21 @@ class LibvirtConnections:
 
         return cb
 
-    def _evict(self, uri: str, conn: object) -> None:
+    def evict(self, uri: str, conn: object) -> bool:
+        """Remove conn only if the cache holds exactly it; close it and fire on_close. True if removed."""
         with self._lock:
             owned = self._conns.get(uri) is conn
             if owned:
                 del self._conns[uri]
-        if owned:  # whoever removes a conn from the cache closes it
-            _quiet_close(conn)
+        if not owned:
+            return False
+        _quiet_close(conn)  # whoever removes a conn from the cache closes it
+        if self._on_close is not None:
+            try:
+                self._on_close(uri)
+            except Exception:
+                log.exception("on_close hook failed", extra={"uri": uri})
+        return True
 
     def drop(self, uri: str) -> None:
         """Forget the cached connection (call after a libvirt error); next get() reconnects."""
@@ -152,7 +173,7 @@ class LibvirtConnections:
                     result.append(True)
                 except Exception:  # noqa: BLE001
                     if conn is not None:
-                        self._evict(uri, conn)
+                        self.evict(uri, conn)
                     result.append(False)
 
             t = threading.Thread(target=run, name=f"libvirt-ping-{uri}", daemon=True)
@@ -169,3 +190,128 @@ def _quiet_close(conn: object) -> None:
         conn.close()
     except Exception:
         log.debug("closing libvirt connection failed", exc_info=True)
+
+
+class LibvirtDriver:
+    """HostDriver host + domain operations over libvirt-python (D-026).
+
+    Disk operations and migrate_live are added in Q10.7.
+    """
+
+    FIRST_SAMPLE_GAP_S = 0.5
+
+    def __init__(
+        self,
+        conns: LibvirtConnections | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._sleep = sleep
+        self._cpu_lock = threading.Lock()
+        self._cpu_prev: dict[str, dict[str, int]] = {}
+        if conns is None:
+            conns = LibvirtConnections(on_close=self._forget_sample)
+        elif conns._on_close is None:
+            conns._on_close = self._forget_sample
+        self._conns = conns
+
+    def _forget_sample(self, uri: str) -> None:
+        with self._cpu_lock:
+            self._cpu_prev.pop(uri, None)
+
+    def ping(self, uri: str, timeout: float = 3) -> bool:
+        return self._conns.ping(uri, timeout)
+
+    @contextlib.contextmanager
+    def _op(self, uri: str):
+        """Yield a live connection; map libvirt errors; drop the connection when the host looks gone."""
+        lib = load_libvirt()
+        try:
+            conn = self._conns.get(uri)
+        except lib.libvirtError as e:
+            self._forget_sample(uri)
+            raise HostUnreachable(str(e)) from e
+        try:
+            yield conn
+        except lib.libvirtError as e:
+            err = map_error(e, lib)
+            if isinstance(err, HostUnreachable):
+                self._conns.evict(uri, conn)
+            raise err from e
+
+    @staticmethod
+    def _lookup(conn, name: str):
+        return conn.lookupByName(name)  # NO_DOMAIN maps to DomainNotFound
+
+    def probe_host(self, uri: str) -> HostInfo:
+        with self._op(uri) as conn:
+            info = conn.getInfo()  # [model, memory MiB, cpus, ...]
+            return HostInfo(cpu_total=int(info[2]), mem_total_mb=int(info[1]))
+
+    def host_stats(self, uri: str) -> HostStats:
+        lib = load_libvirt()
+        with self._op(uri) as conn:
+            all_cpus = lib.VIR_NODE_CPU_STATS_ALL_CPUS
+            with self._cpu_lock:
+                prev = self._cpu_prev.get(uri)
+            if prev is None:  # D-026: first call takes two samples so cpu_pct is a real number
+                prev = dict(conn.getCPUStats(all_cpus))
+                self._sleep(self.FIRST_SAMPLE_GAP_S)
+            cur = dict(conn.getCPUStats(all_cpus))
+            mem = dict(conn.getMemoryStats(lib.VIR_NODE_MEMORY_STATS_ALL_CELLS))
+            with self._cpu_lock:
+                self._cpu_prev[uri] = cur
+            return HostStats(cpu_pct=cpu_pct(prev, cur), mem_used_mb=mem_used_mb(mem))
+
+    def list_domains(self, uri: str) -> dict[str, DomainState]:
+        out: dict[str, DomainState] = {}
+        with self._op(uri) as conn:
+            for dom in conn.listAllDomains(0):
+                try:
+                    out[dom.name()] = map_domain_state(dom.state(0)[0])
+                except load_libvirt().libvirtError as e:
+                    if not isinstance(map_error(e), DomainNotFound):
+                        raise  # a domain that vanished mid-listing is simply skipped
+        return out
+
+    def domain_state(self, uri: str, name: str) -> DomainState | None:
+        try:
+            with self._op(uri) as conn:
+                return map_domain_state(self._lookup(conn, name).state(0)[0])
+        except DomainNotFound:
+            return None
+
+    def define_domain(self, uri: str, spec: DomainSpec) -> None:
+        lib = load_libvirt()
+        with self._op(uri) as conn:
+            try:
+                conn.lookupByName(spec.name)
+            except lib.libvirtError as e:
+                if not isinstance(map_error(e, lib), DomainNotFound):
+                    raise
+            else:
+                raise DomainExists(f"domain {spec.name} already defined")
+            conn.defineXML(domain_xml(spec))
+
+    def undefine_domain(self, uri: str, name: str) -> None:
+        with self._op(uri) as conn:
+            dom = self._lookup(conn, name)
+            if dom.isActive():  # libvirt would silently make it transient
+                raise DriverError(f"domain {name} is running")
+            dom.undefine()
+
+    def start_domain(self, uri: str, name: str) -> None:
+        # No timeout: create() can block for ~the NFS lease after a host death (probe results).
+        with self._op(uri) as conn:
+            self._lookup(conn, name).create()
+
+    def destroy_domain(self, uri: str, name: str) -> None:
+        with self._op(uri) as conn:
+            self._lookup(conn, name).destroy()
+
+    def shutdown_domain(self, uri: str, name: str) -> None:
+        with self._op(uri) as conn:
+            self._lookup(conn, name).shutdown()
+
+    def reboot_domain(self, uri: str, name: str) -> None:
+        with self._op(uri) as conn:
+            self._lookup(conn, name).reboot(0)
