@@ -3,7 +3,7 @@ from contextlib import contextmanager
 
 from sqlalchemy import Engine, text
 
-LOCK_NAMESPACE: dict[str, int] = {"vm": 1, "host": 2}
+LOCK_NAMESPACE: dict[str, int] = {"vm": 1, "host": 2, "scheduler": 3}
 
 
 @contextmanager

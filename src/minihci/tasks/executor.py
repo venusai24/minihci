@@ -37,7 +37,7 @@ class Step:
 @dataclass(frozen=True)
 class TaskType:
     name: str
-    target_kind: Literal["vm", "host"]
+    target_kind: Literal["vm", "host", "scheduler"]
     steps: list[Step]
     on_rolled_back: Callable[[StepContext], None] | None = None
 

@@ -15,6 +15,7 @@ from minihci.paths import resolve_image
 from minihci.scheduler.config import load_config
 from minihci.scheduler.placement import PLACEABLE_STATUSES, NoCapacity, place
 from minihci.tasks.engine import enqueue
+from minihci.tasks.locks import LOCK_NAMESPACE
 
 log = logging.getLogger("minihci.api")
 router = APIRouter()
@@ -30,7 +31,7 @@ class VmIn(BaseModel):
 
 def _auto_place(s: Session, body: VmIn) -> Host:
     """Pick a host for a VM with no host_id (D-022). Serialised so two creates cannot take the last slot."""
-    s.execute(text("SELECT pg_advisory_xact_lock(3, 0)"))
+    s.execute(text("SELECT pg_advisory_xact_lock(:ns, 0)"), {"ns": LOCK_NAMESPACE["scheduler"]})
     hosts = list(
         s.scalars(select(Host).where(Host.status.in_(PLACEABLE_STATUSES)).order_by(Host.id).with_for_update(read=True))
     )
