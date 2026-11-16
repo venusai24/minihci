@@ -273,6 +273,9 @@ class FakeConn:
         self.keepalive = None
         self.close_cbs: list[tuple] = []
         self.closed = False
+        self.close_count = 0
+        self.closed_with_cb = False
+        self.in_close_cb = False
 
     def _check(self, op=None):
         if not self.alive or self.host.down:
@@ -298,17 +301,27 @@ class FakeConn:
         return 0
 
     def unregisterCloseCallback(self):
+        if self.in_close_cb:
+            raise AssertionError("re-entrant close/unregister inside close callback")
         self.close_cbs.clear()
 
     def close(self):
+        if self.in_close_cb:
+            raise AssertionError("re-entrant close/unregister inside close callback")
+        self.close_count += 1
+        self.closed_with_cb = bool(self.close_cbs)
         self.alive = False
         self.closed = True
         return 0
 
     def simulate_close(self, reason=CONSTS["VIR_CONNECT_CLOSE_REASON_KEEPALIVE"]):
         self.alive = False
-        for cb, opaque in list(self.close_cbs):
-            cb(self, reason, opaque)
+        self.in_close_cb = True
+        try:
+            for cb, opaque in list(self.close_cbs):
+                cb(self, reason, opaque)
+        finally:
+            self.in_close_cb = False
 
     def getInfo(self):
         self._check("getInfo")

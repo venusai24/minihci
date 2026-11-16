@@ -425,6 +425,10 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   (5) `MigrationResult.downtime_ms` becomes `int | None` (the column is already nullable). `duration_ms`
   stays `int`: `time_elapsed`, else the wall clock around `migrate3`. (6) `ping(uri, timeout=3)` is a
   public LibvirtDriver method, not yet in the Protocol; Q12 adds it to the Protocol and FakeDriver.
+  (7) Connection teardown: every close first calls `unregisterCloseCallback()` (errors ignored), because a
+  registered callback holds a ref on the conn. The close callback never closes or unregisters (that can
+  deadlock inside libvirt); it evicts and queues the conn, and the next `get()`/`drop()` closes queued conns
+  outside the lock. `ping` evicts only the conn it used, never a newer one. Only the party that removes a conn from the cache closes it.
 - **Consequences:** Default installs stay light. The real driver needs `uv sync --extra libvirt`. Disk
   operations depend on at least one storage host being reachable. During HA they fail over through the list.
   The first stats call per host costs 0.5 s once.
