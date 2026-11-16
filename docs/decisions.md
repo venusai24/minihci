@@ -407,3 +407,26 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   (2)+(3), such as `_auto_place` and `vm.migrate` `check_destination`, are compatible. `check_destination`
   takes a FK key-share on the VM row after (2). That is safe because a caller that holds (1) on that VM
   sees its open migrate task and exits before it asks for (2).
+
+## D-026 Libvirt driver: optional extra, disk host, first `host_stats` sample, state mapping
+- **Context:** Q10 implements HostDriver with libvirt-python while the hosts stay off. The PRD does not say
+  whether libvirt-python is a hard dependency, which host serves the URI-less disk methods
+  (`disk_exists`, `create_disk_overlay`, `delete_disk`), what the first `host_stats` call returns, how
+  libvirt domain states map to `DomainState`, or what to record when migration job stats lack a key.
+- **Decision:** (1) `libvirt-python` is an optional extra `[libvirt]`; `minihci.driver.libvirt` imports it
+  lazily, so `import minihci` and the default FakeDriver install never need it. A missing module raises
+  `DriverError` naming the extra. (2) Disk methods run on the first host that answers `ping` from the new
+  setting `libvirt_storage_uris: list[str]` (in order); none answering raises `HostUnreachable`. The NFS
+  share is common to all hosts, so any host works, and `pool.refresh(0)` precedes every path lookup.
+  (3) `host_stats` keeps the previous `getCPUStats` sample per URI; on the first call (no previous
+  sample) it takes two samples 0.5 s apart (sleep injectable) and returns a real float, as D-023 says.
+  It never returns `None`, because `HostStats.cpu_pct` and `host_metrics.cpu_pct` are NOT NULL.
+  (4) RUNNING = running, blocked, paused, shutting down, pmsuspended; SHUT_OFF = shutoff, crashed, nostate.
+  (5) `MigrationResult.downtime_ms` becomes `int | None` (the column is already nullable). `duration_ms`
+  stays `int`: `time_elapsed`, else the wall clock around `migrate3`. (6) `ping(uri, timeout=3)` is a
+  public LibvirtDriver method, not yet in the Protocol; Q12 adds it to the Protocol and FakeDriver.
+- **Consequences:** Default installs stay light. The real driver needs `uv sync --extra libvirt`. Disk
+  operations depend on at least one storage host being reachable. During HA they fail over through the list.
+  The first stats call per host costs 0.5 s once.
+- **How to undo:** Move libvirt-python into the main dependencies. Pass a URI to the disk methods (a
+  Protocol change). Return `None` on the first sample after making the column nullable.
