@@ -119,6 +119,9 @@ class FakePool:
     def isActive(self):
         return int(self.active)
 
+    def XMLDesc(self, flags=0):
+        return f"<pool type='dir'><name>{self._name}</name><target><path>{self.path}</path></target></pool>"
+
     def create(self, flags=0):
         self.active = True
 

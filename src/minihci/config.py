@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     driver: Literal["fake", "libvirt"] = "fake"
     storage_root: str = "/srv/minihci/images"
     image_root: str = "/srv/minihci/base"
+    libvirt_storage_uris: list[str] = []  # D-026: hosts tried in order for disk operations
     fake_state_file: Path | None = None
     fake_delays: dict[str, float] = {}  # driver method -> seconds, slept BEFORE the effect
     fake_delays_after: dict[str, float] = {}  # slept AFTER the effect

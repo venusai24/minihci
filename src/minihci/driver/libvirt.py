@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import threading
 import time
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from types import ModuleType
 
@@ -22,10 +24,12 @@ from minihci.driver.base import (
     HostInfo,
     HostStats,
     HostUnreachable,
+    MigrationResult,
 )
 from minihci.driver.libvirt_errors import load_libvirt, map_error
-from minihci.driver.libvirt_stats import cpu_pct, map_domain_state, mem_used_mb
-from minihci.driver.libvirt_xml import domain_xml
+from minihci.driver.libvirt_stats import cpu_pct, map_domain_state, mem_used_mb, migration_result
+from minihci.driver.libvirt_xml import dir_pool_xml, domain_xml, overlay_volume_xml
+from minihci.paths import resolve_image
 
 log = logging.getLogger(__name__)
 
@@ -195,8 +199,12 @@ def _quiet_close(conn: object) -> None:
 class LibvirtDriver:
     """HostDriver host + domain operations over libvirt-python (D-026).
 
-    Disk operations and migrate_live are added in Q10.7.
+    Disk ops run on the first reachable host of `storage_uris` (D-026); pools are refreshed before
+    every volume lookup because another host may have created or deleted the file.
     """
+
+    IMAGES_POOL = "minihci-images"
+    VMS_POOL = "minihci-vms"
 
     FIRST_SAMPLE_GAP_S = 0.5
 
@@ -204,7 +212,13 @@ class LibvirtDriver:
         self,
         conns: LibvirtConnections | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        storage_uris: list[str] | None = None,
+        image_root: str = "/srv/minihci/base",
+        storage_root: str = "/srv/minihci/images",
     ) -> None:
+        self._storage_uris = list(storage_uris or [])
+        self._image_root = image_root
+        self._storage_root = storage_root
         self._sleep = sleep
         self._cpu_lock = threading.Lock()
         self._cpu_prev: dict[str, dict[str, int]] = {}
@@ -315,3 +329,130 @@ class LibvirtDriver:
     def reboot_domain(self, uri: str, name: str) -> None:
         with self._op(uri) as conn:
             self._lookup(conn, name).reboot(0)
+
+    # ---- disks (D-026) ----
+
+    def _disk_uri(self) -> str:
+        for uri in self._storage_uris:
+            if self.ping(uri):
+                return uri
+        raise HostUnreachable("no libvirt storage host answered")
+
+    def _check_disk_path(self, path: str) -> None:
+        if os.path.normpath(os.path.dirname(path)) != os.path.normpath(self._storage_root):
+            raise DriverError(f"disk path must be directly under {self._storage_root}")
+
+    def _ensure_pools(self, conn) -> list:
+        lib = load_libvirt()
+        pools = []
+        for name, path in ((self.IMAGES_POOL, self._image_root), (self.VMS_POOL, self._storage_root)):
+            try:
+                pool = conn.storagePoolLookupByName(name)
+            except lib.libvirtError as e:
+                if e.get_error_code() != lib.VIR_ERR_NO_STORAGE_POOL:
+                    raise
+                pool = conn.storagePoolDefineXML(dir_pool_xml(name, path), 0)
+                pool.setAutostart(1)
+            actual = ET.fromstring(pool.XMLDesc(0)).findtext("target/path") or ""
+            if os.path.normpath(actual) != os.path.normpath(path):  # D-026 (8): never redefine a pool
+                raise DriverError(f"pool {name} targets {actual}, expected {path}")
+            if not pool.isActive():
+                pool.create(0)
+            pools.append(pool)
+        return pools
+
+    def _find_volume(self, conn):
+        """Return lookup(path) -> volume or None, after ensuring and refreshing the pools."""
+        lib = load_libvirt()
+        pools = self._ensure_pools(conn)
+        for pool in pools:
+            pool.refresh(0)  # the pool caches its volume list; another host may have changed the share
+
+        def lookup(path: str):
+            try:
+                return conn.storageVolLookupByPath(path)
+            except lib.libvirtError as e:
+                if e.get_error_code() == lib.VIR_ERR_NO_STORAGE_VOL:
+                    return None
+                raise
+
+        return pools, lookup
+
+    def disk_exists(self, path: str) -> bool:
+        with self._op(self._disk_uri()) as conn:
+            _, lookup = self._find_volume(conn)
+            return lookup(path) is not None
+
+    def create_disk_overlay(self, base_image: str, path: str) -> None:
+        try:
+            base = resolve_image(base_image, self._image_root)  # D-014
+        except ValueError as e:
+            raise DriverError(f"invalid base image: {e}") from e
+        self._check_disk_path(path)
+        with self._op(self._disk_uri()) as conn:
+            pools, lookup = self._find_volume(conn)
+            if lookup(path) is not None:
+                raise DriverError(f"disk {path} already exists")
+            bvol = lookup(base)
+            if bvol is None:
+                raise DriverError(f"base image {base} not found")
+            capacity = bvol.info()[1]
+            root = ET.fromstring(bvol.XMLDesc(0))
+            fmt = root.find("target/format")
+            bfmt = fmt.get("type") if fmt is not None else "qcow2"
+            pools[1].createXML(overlay_volume_xml(os.path.basename(path), capacity, base, bfmt), 0)
+
+    def delete_disk(self, path: str) -> None:
+        self._check_disk_path(path)
+        with self._op(self._disk_uri()) as conn:
+            _, lookup = self._find_volume(conn)
+            vol = lookup(path)
+            if vol is None:
+                raise DriverError(f"disk {path} not found")
+            vol.delete(0)
+
+    # ---- migration (D-026, FR-3.2) ----
+
+    def _evict_dead_or_both(self, pairs, lib) -> None:
+        """After a connection-level migrate failure evict the conns that are dead; if none is, evict both."""
+        dead = []
+        for uri, conn in pairs:
+            try:
+                alive = bool(conn.isAlive())
+            except lib.libvirtError:
+                alive = False
+            if not alive:
+                dead.append((uri, conn))
+        for uri, conn in dead or pairs:
+            self._conns.evict(uri, conn)
+
+    def migrate_live(self, src_uri: str, dst_uri: str, name: str) -> MigrationResult:
+        lib = load_libvirt()
+        flags = lib.VIR_MIGRATE_LIVE | lib.VIR_MIGRATE_PERSIST_DEST | lib.VIR_MIGRATE_UNDEFINE_SOURCE
+        with self._op(src_uri) as sconn:
+            dom = self._lookup(sconn, name)
+            if not dom.isActive():
+                raise DriverError(f"domain {name} is not running")
+            with self._op(dst_uri) as dconn:
+                try:
+                    dconn.lookupByName(name)
+                except lib.libvirtError as e:
+                    if not isinstance(map_error(e, lib), DomainNotFound):
+                        raise
+                else:
+                    raise DriverError(f"domain {name} already exists on destination")
+                t0 = time.monotonic()
+                try:
+                    newdom = dom.migrate3(dconn, {}, flags)  # on error the domain stays on the source
+                except lib.libvirtError as e:
+                    err = map_error(e, lib)
+                    if isinstance(err, HostUnreachable):
+                        self._evict_dead_or_both(((src_uri, sconn), (dst_uri, dconn)), lib)
+                    raise err from e
+                wall_ms = int((time.monotonic() - t0) * 1000)
+                try:  # stats come from the destination domain; the source is undefined by now
+                    stats = newdom.jobStats(lib.VIR_DOMAIN_JOB_STATS_COMPLETED)
+                except lib.libvirtError:
+                    log.warning("migration job stats unavailable for %s", name, exc_info=True)
+                    stats = None
+                return migration_result(stats, wall_ms)

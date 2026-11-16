@@ -435,3 +435,4 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   The first stats call per host costs 0.5 s once.
 - **How to undo:** Move libvirt-python into the main dependencies. Pass a URI to the disk methods (a
   Protocol change). Return `None` on the first sample after making the column nullable.
+- **Amendment (Q10.7 ruling):** (8) A pre-existing `minihci-images`/`minihci-vms` pool whose `target/path` (normalized) differs from `image_root`/`storage_root` raises `DriverError` naming both paths; the driver never redefines or moves a pool. Settings defaults stay as they are (FakeDriver and tests use them); a libvirt deployment must set `MINIHCI_IMAGE_ROOT=/var/lib/minihci/images` and `MINIHCI_STORAGE_ROOT=/var/lib/minihci/vms` to match the hosts' pools. Undo: redefine mismatched pools instead of raising.

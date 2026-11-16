@@ -113,8 +113,7 @@ def test_state_file_shared_between_instances(tmp_path):
 def test_build_driver(tmp_path):
     d = build_driver(Settings(fake_state_file=tmp_path / "s.json", fake_fail={"start_domain": 1}))
     assert isinstance(d, FakeDriver) and d.fail == {"start_domain": 1}
-    with pytest.raises(NotImplementedError):
-        build_driver(Settings(driver="libvirt"))
+    # driver="libvirt" now selects LibvirtDriver (tests/test_libvirt_disk_migrate.py)
 
 
 def test_shutdown_domain(drv):
