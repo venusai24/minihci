@@ -19,7 +19,10 @@ from minihci.driver.base import (
     HostInfo,
     HostStats,
     HostUnreachable,
+    MigrationResult,
 )
+
+FAKE_DOWNTIME_MS = 30
 
 
 class FakeDriver:
@@ -213,3 +216,21 @@ class FakeDriver:
             del state["disks"][path]
 
         self._call("delete_disk", fn)
+
+    def migrate_live(self, src_uri: str, dst_uri: str, name: str) -> MigrationResult:
+        t0 = time.monotonic()
+
+        def fn(state: dict[str, Any]) -> MigrationResult:
+            src = self._host(state, src_uri)
+            dst = self._host(state, dst_uri)
+            d = src["domains"].get(name)
+            if d is None:
+                raise DomainNotFound(f"domain not found: {name}")
+            if d["state"] != DomainState.RUNNING.value:
+                raise DriverError(f"domain not running: {name}")
+            if name in dst["domains"]:
+                raise DriverError(f"domain exists on destination: {name}")
+            dst["domains"][name] = src["domains"].pop(name)
+            return MigrationResult(duration_ms=int((time.monotonic() - t0) * 1000), downtime_ms=FAKE_DOWNTIME_MS)
+
+        return self._call("migrate_live", fn)

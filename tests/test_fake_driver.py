@@ -15,8 +15,9 @@ from minihci.driver.base import (
     HostInfo,
     HostStats,
     HostUnreachable,
+    MigrationResult,
 )
-from minihci.driver.fake import FakeDriver
+from minihci.driver.fake import FAKE_DOWNTIME_MS, FakeDriver
 
 URI = "qemu+ssh://a/system"
 SPEC = DomainSpec(name="vm1", vcpus=1, mem_mb=512, disk_path="/srv/vm1.qcow2")
@@ -207,3 +208,84 @@ def test_host_stats_injected_failure(drv):
 def test_set_load_out_of_range(drv, bad):
     with pytest.raises(ValueError):
         drv.set_load(URI, bad)
+
+
+# ---- migrate_live ------------------------------------------------------
+URI2 = "qemu+ssh://b/system"
+
+
+@pytest.fixture
+def two(drv):
+    drv.add_host(URI2, cpu_total=8, mem_total_mb=16384)
+    return drv
+
+
+def _running(d, uri=URI):
+    d.define_domain(uri, SPEC)
+    d.start_domain(uri, "vm1")
+
+
+def test_migrate_live_happy_path(two):
+    _running(two)
+    res = two.migrate_live(URI, URI2, "vm1")
+    assert isinstance(res, MigrationResult)
+    assert res.duration_ms >= 0
+    assert res.downtime_ms == FAKE_DOWNTIME_MS == 30
+    assert two.domain_state(URI, "vm1") is None
+    assert two.domain_state(URI2, "vm1") == DomainState.RUNNING
+    assert two.boot_count(URI2, "vm1") == 1
+
+
+def test_migrate_live_not_on_src(two):
+    with pytest.raises(DomainNotFound):
+        two.migrate_live(URI, URI2, "vm1")
+    assert two.list_domains(URI2) == {}
+
+
+def test_migrate_live_not_running(two):
+    two.define_domain(URI, SPEC)
+    with pytest.raises(DriverError):
+        two.migrate_live(URI, URI2, "vm1")
+    assert two.domain_state(URI, "vm1") == DomainState.SHUT_OFF
+    assert two.list_domains(URI2) == {}
+
+
+def test_migrate_live_name_on_dst(two):
+    _running(two)
+    two.define_domain(URI2, SPEC)
+    with pytest.raises(DriverError):
+        two.migrate_live(URI, URI2, "vm1")
+    assert two.domain_state(URI, "vm1") == DomainState.RUNNING
+    assert two.domain_state(URI2, "vm1") == DomainState.SHUT_OFF
+
+
+@pytest.mark.parametrize("src,dst", [("qemu+ssh://x/system", URI2), (URI, "qemu+ssh://x/system")])
+def test_migrate_live_unknown_host(two, src, dst):
+    if src == URI:
+        _running(two)
+    with pytest.raises(HostUnreachable):
+        two.migrate_live(src, dst, "vm1")
+    if src == URI:
+        assert two.domain_state(URI, "vm1") == DomainState.RUNNING
+
+
+def test_migrate_live_injected_failure(two):
+    two.fail = {"migrate_live": 1}
+    _running(two)
+    with pytest.raises(DriverError):
+        two.migrate_live(URI, URI2, "vm1")
+    assert two.domain_state(URI, "vm1") == DomainState.RUNNING
+    assert two.list_domains(URI2) == {}
+    two.migrate_live(URI, URI2, "vm1")
+    assert two.domain_state(URI2, "vm1") == DomainState.RUNNING
+
+
+def test_migrate_live_file_backed_visible_to_second_driver(tmp_path):
+    f = tmp_path / "s.json"
+    a, b = FakeDriver(state_file=f), FakeDriver(state_file=f)
+    a.add_host(URI, 8, 16384)
+    a.add_host(URI2, 8, 16384)
+    _running(a)
+    a.migrate_live(URI, URI2, "vm1")
+    assert b.domain_state(URI, "vm1") is None
+    assert b.domain_state(URI2, "vm1") == DomainState.RUNNING

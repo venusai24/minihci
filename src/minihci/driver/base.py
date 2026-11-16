@@ -35,6 +35,12 @@ class DomainSpec:
     disk_path: str
 
 
+@dataclass(frozen=True)
+class MigrationResult:
+    duration_ms: int
+    downtime_ms: int
+
+
 class DomainState(StrEnum):
     RUNNING = "running"
     SHUT_OFF = "shut_off"
@@ -55,3 +61,6 @@ class HostDriver(Protocol):
     def disk_exists(self, path: str) -> bool: ...
     def create_disk_overlay(self, base_image: str, path: str) -> None: ...  # DriverError if path exists
     def delete_disk(self, path: str) -> None: ...  # DriverError if missing
+    # DomainNotFound if not on src; DriverError if not running or name exists on dst;
+    # HostUnreachable for unknown host. On any error the domain stays on src.
+    def migrate_live(self, src_uri: str, dst_uri: str, name: str) -> MigrationResult: ...
