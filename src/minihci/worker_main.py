@@ -14,6 +14,7 @@ from minihci.config import Settings
 from minihci.db import make_engine, make_session_factory
 from minihci.driver import build_driver
 from minihci.logging import configure_logging
+from minihci.scheduler import collector
 from minihci.tasks.recovery import recover_orphans
 from minihci.tasks.registry import REGISTRY
 from minihci.tasks.worker import Worker
@@ -81,9 +82,14 @@ def main(argv: list[str] | None = None) -> int:
                 target=reconcile.run_forever, args=(stop, session_factory, driver, settings), name="reconciler"
             )
         )
+        threads.append(
+            threading.Thread(
+                target=collector.run_forever, args=(stop, session_factory, driver, settings), name="collector"
+            )
+        )
         for th in threads:
             th.start()
-        logger.info("worker started with %d threads", len(threads) - 1)
+        logger.info("worker started with %d threads", len(threads))
         for th in threads:
             th.join()
         return 0

@@ -1,6 +1,7 @@
 """Host metrics collector (FR-3.3, D-023). Observation only: reads host stats, never mutates hosts or tasks."""
 
 import logging
+import threading
 from dataclasses import dataclass, field
 
 from sqlalchemy import select, text
@@ -50,3 +51,12 @@ def collect_once(session_factory: sessionmaker[Session], driver: HostDriver, set
         )
         report.pruned = res.rowcount
     return report
+
+
+def run_forever(stop: threading.Event, session_factory, driver: HostDriver, settings: Settings) -> None:
+    while not stop.is_set():
+        try:
+            collect_once(session_factory, driver, settings)
+        except Exception:
+            log.exception("collector pass failed")
+        stop.wait(settings.collector_interval_s)
