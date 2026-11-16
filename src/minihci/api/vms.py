@@ -13,7 +13,7 @@ from minihci.api.idempotency import fingerprint, run_idempotent
 from minihci.models import Host, Task, Vm
 from minihci.paths import resolve_image
 from minihci.scheduler.config import load_config
-from minihci.scheduler.placement import PLACEABLE_STATUSES, NoCapacity, place
+from minihci.scheduler.placement import PLACEABLE_STATUSES, NoCapacity, fits, place
 from minihci.tasks.engine import enqueue
 from minihci.tasks.locks import LOCK_NAMESPACE
 
@@ -183,3 +183,58 @@ def stop_vm(
 @router.delete("/vms/{vm_id}", status_code=202)
 def delete_vm(vm_id: int, request: Request, idempotency_key: Annotated[str | None, Header()] = None):
     return _vm_op(request, vm_id, "delete", idempotency_key, {})
+
+
+class MigrateIn(BaseModel):
+    host_id: int
+
+
+@router.post("/vms/{vm_id}/migrate", status_code=202)
+def migrate_vm(
+    vm_id: int,
+    body: MigrateIn,
+    request: Request,
+    idempotency_key: Annotated[str | None, Header()] = None,
+):
+    def create(s: Session):
+        vm = s.scalars(select(Vm).where(Vm.id == vm_id).with_for_update()).first()
+        if vm is None or vm.desired_state == "absent":
+            raise HTTPException(404, "vm not found")
+        if vm.actual_state != "running" or vm.desired_state != "running":
+            raise HTTPException(409, "vm is not running")
+        busy = s.scalars(
+            select(Task.id).where(
+                Task.type.in_(("vm.delete", "vm.migrate")),
+                Task.target_id == vm_id,
+                Task.state.in_(("pending", "running")),
+            )
+        ).first()
+        if busy is not None:
+            raise HTTPException(409, "vm has an open delete or migrate task")
+        if body.host_id == vm.host_id:
+            raise HTTPException(409, "vm is already on that host")
+        s.execute(text("SELECT pg_advisory_xact_lock(:ns, 0)"), {"ns": LOCK_NAMESPACE["scheduler"]})
+        dst = s.scalars(select(Host).where(Host.id == body.host_id).with_for_update(read=True)).first()
+        if dst is None or dst.status not in PLACEABLE_STATUSES:
+            raise HTTPException(409, "destination host is not placeable")
+        rows = s.execute(
+            select(Vm.host_id, func.sum(Vm.vcpus), func.sum(Vm.mem_mb))
+            .where(Vm.desired_state != "absent", Vm.id != vm_id)
+            .group_by(Vm.host_id)
+        )
+        usage = {hid: (int(cpu), int(mem)) for hid, cpu, mem in rows}
+        if not fits(vm, dst, usage, load_config(s)):
+            raise HTTPException(409, "destination host has no capacity for this vm")
+        return enqueue(s, "vm.migrate", vm_id, {"src_host_id": vm.host_id, "dst_host_id": dst.id})
+
+    task, created = run_idempotent(
+        request.app.state.session_factory,
+        idempotency_key,
+        fingerprint({"op": "vm.migrate", "vm_id": vm_id, "host_id": body.host_id}),
+        create,
+    )
+    headers = {"Location": f"/tasks/{task.id}"}
+    if not created:
+        headers["Idempotent-Replayed"] = "true"
+    log.info("task_enqueued", extra={"fields": {"task_id": task.id}})
+    return JSONResponse({"task_id": task.id, "target_id": task.target_id}, status_code=202, headers=headers)

@@ -172,3 +172,99 @@ def test_auto_place_replay_same_task(client, session_factory):
     assert b.json()["task_id"] == a.json()["task_id"]
     assert b.headers["Idempotent-Replayed"] == "true"
     assert _counts(session_factory) == (1, 1)
+
+
+# --- migrate (Q08.4, FR-3.1, D-024) ---
+
+URI_B = "qemu+ssh://b/system"
+
+
+@pytest.fixture
+def dst_id(session_factory, driver):
+    return add_ready_host(session_factory, driver, name="b", uri=URI_B)
+
+
+def _migrate(client, vm_id, host, **h):
+    return client.post(f"/vms/{vm_id}/migrate", json={"host_id": host}, headers=h)
+
+
+def test_migrate_202_then_host_changes(client, session_factory, driver, host_id, dst_id):
+    vm_id = make_vm(session_factory, driver, host_id)
+    r = _migrate(client, vm_id, dst_id)
+    assert r.status_code == 202
+    assert r.headers["Location"] == f"/tasks/{r.json()['task_id']}"
+    assert r.json()["target_id"] == vm_id
+    drain(session_factory, driver)
+    assert task_state(client, r) == "succeeded"
+    assert client.get(f"/vms/{vm_id}").json()["host_id"] == dst_id
+    assert_db_matches_driver(session_factory, driver)
+
+
+def _no_new_task(session_factory, before):
+    assert _counts(session_factory)[1] == before
+
+
+def test_migrate_unknown_vm_404(client, dst_id):
+    assert _migrate(client, 999, dst_id).status_code == 404
+
+
+def test_migrate_absent_vm_404(client, session_factory, driver, host_id, dst_id):
+    vm_id = make_vm(session_factory, driver, host_id)
+    with session_factory() as s, s.begin():
+        s.get(Vm, vm_id).desired_state = "absent"
+    assert _migrate(client, vm_id, dst_id).status_code == 404
+
+
+def test_migrate_vm_not_running_409(client, session_factory, driver, host_id, dst_id):
+    vm_id = make_vm(session_factory, driver, host_id, running=False)
+    assert _migrate(client, vm_id, dst_id).status_code == 409
+    assert _counts(session_factory)[1] == 0
+
+
+def test_migrate_same_host_409(client, session_factory, driver, host_id, dst_id):
+    vm_id = make_vm(session_factory, driver, host_id)
+    assert _migrate(client, vm_id, host_id).status_code == 409
+    assert _counts(session_factory)[1] == 0
+
+
+def test_migrate_dst_not_placeable_409(client, session_factory, driver, host_id):
+    vm_id = make_vm(session_factory, driver, host_id)
+    bad = _add_host(session_factory, "down", 8, 16384, status="failed")
+    assert _migrate(client, vm_id, bad).status_code == 409
+    assert _counts(session_factory)[1] == 0
+
+
+def test_migrate_unknown_dst_409(client, session_factory, driver, host_id):
+    vm_id = make_vm(session_factory, driver, host_id)
+    assert _migrate(client, vm_id, 9999).status_code == 409
+    assert _counts(session_factory)[1] == 0
+
+
+def test_migrate_no_capacity_409(client, session_factory, driver, host_id):
+    vm_id = make_vm(session_factory, driver, host_id)
+    tiny = _add_host(session_factory, "tiny", 8, 256)
+    assert _migrate(client, vm_id, tiny).status_code == 409
+    assert _counts(session_factory)[1] == 0
+
+
+def test_migrate_open_task_409(client, session_factory, driver, host_id, dst_id):
+    vm_id = make_vm(session_factory, driver, host_id)
+    assert _migrate(client, vm_id, dst_id).status_code == 202
+    assert _migrate(client, vm_id, dst_id).status_code == 409
+    assert _counts(session_factory)[1] == 1
+    drain(session_factory, driver)
+    d = client.delete(f"/vms/{vm_id}")
+    assert d.status_code == 202
+    assert _migrate(client, vm_id, host_id).status_code == 409
+    assert _counts(session_factory)[1] == 2
+
+
+def test_migrate_replay_same_task(client, session_factory, driver, host_id, dst_id):
+    vm_id = make_vm(session_factory, driver, host_id)
+    h = {"Idempotency-Key": "mig-k"}
+    a = _migrate(client, vm_id, dst_id, **h)
+    b = _migrate(client, vm_id, dst_id, **h)
+    assert a.status_code == b.status_code == 202
+    assert b.json()["task_id"] == a.json()["task_id"]
+    assert b.headers["Idempotent-Replayed"] == "true"
+    assert _counts(session_factory)[1] == 1
