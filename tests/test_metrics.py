@@ -221,3 +221,47 @@ def test_metrics_suspect_dead_and_missed_heartbeats(session_factory):
     assert st[(("host", "b"), ("status", "dead"))] == 1
     m = _samples(text, "minihci_host_missed_heartbeats")
     assert m == {(("host", "a"),): 4, (("host", "b"),): 9, (("host", "c"),): 0}
+
+
+def test_metrics_ha_restart_and_pending_restart(session_factory):
+    from datetime import datetime
+
+    from minihci.models import HaRestart, Host, Task, Vm
+
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    with session_factory() as s:
+        h1 = Host(name="h1", libvirt_uri="u://1", status="dead")
+        h2 = Host(name="h2", libvirt_uri="u://2", status="ready")
+        s.add_all([h1, h2])
+        s.flush()
+        vms = [
+            Vm(name=n, host_id=h1.id, vcpus=1, mem_mb=128, image="i", disk_path=f"/{n}", actual_state=st)
+            for n, st in (("a", "running"), ("b", "pending_restart"), ("c", "pending_restart"), ("d", "running"))
+        ]
+        s.add_all(vms)
+        s.flush()
+        # a: two restarts, last one (later running_at) is 12.5 s; b: unfinished; d: finished 30 s
+        rows = [(vms[0], 40000, 10), (vms[0], 12500, 20), (vms[1], None, None), (vms[3], 30000, 15)]
+        for i, (vm, ms, off) in enumerate(rows):
+            t = Task(type="vm.ha_restart", target_id=vm.id)
+            s.add(t)
+            s.flush()
+            s.add(
+                HaRestart(
+                    task_id=t.id,
+                    vm_id=vm.id,
+                    from_host_id=h1.id,
+                    to_host_id=h2.id,
+                    failed_at=t0,
+                    running_at=None if ms is None else t0.replace(minute=off),
+                    recovery_ms=ms,
+                )
+            )
+        s.commit()
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    text = client.get("/metrics").text
+    assert _samples(text, "minihci_vms_pending_restart") == {(): 2}
+    assert _samples(text, "minihci_ha_restart_recovery_seconds") == {
+        (("vm", "a"),): 12.5,
+        (("vm", "d"),): 30.0,
+    }

@@ -7,7 +7,7 @@ from prometheus_client.core import GaugeMetricFamily, HistogramMetricFamily, Met
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
-from minihci.models import Host, Migration, Task
+from minihci.models import HaRestart, Host, Migration, Task, Vm
 
 router = APIRouter()
 
@@ -31,6 +31,33 @@ class DbCollector:
         yield self._task_durations()
         yield from self._hosts()
         yield from self._migrations()
+        yield from self._ha()
+
+    def _ha(self) -> Iterator[Metric]:
+        with self._sf() as s:
+            pending = s.scalar(select(func.count()).select_from(Vm).where(Vm.actual_state == "pending_restart")) or 0
+            rows = s.execute(
+                select(Vm.id, Vm.name, HaRestart.recovery_ms)
+                .join(Vm, Vm.id == HaRestart.vm_id)
+                .where(
+                    HaRestart.running_at.is_not(None),
+                    HaRestart.recovery_ms.is_not(None),
+                    Vm.desired_state != "absent",
+                )
+                .order_by(Vm.id, HaRestart.running_at, HaRestart.id)
+            ).all()
+        g = GaugeMetricFamily("minihci_vms_pending_restart", "VMs waiting for capacity to be restarted")
+        g.add_metric([], pending)
+        yield g
+        last = {vm_id: (name, ms) for vm_id, name, ms in rows}  # ordered: last restart per VM wins
+        r = GaugeMetricFamily(
+            "minihci_ha_restart_recovery_seconds",
+            "Failure-to-running time of each VM's last HA restart",
+            labels=["vm"],
+        )
+        for name, ms in sorted(last.values()):
+            r.add_metric([name], ms / 1000.0)
+        yield r
 
     def _migrations(self) -> Iterator[Metric]:
         with self._sf() as s:
