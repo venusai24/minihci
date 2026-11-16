@@ -292,3 +292,33 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   threshold/cooldown columns to the same row.
 - **How to undo:** Make `host_id` required again and drop `api/scheduler.py`, the task type and
   revision 0005. To switch to measured load, feed `place` the latest `host_metrics` instead of allocations.
+
+## D-023 Host metrics: `host_stats` returns CPU % + used memory; collector thread appends rows, prunes after 24 h
+- **Context:** FR-3.3 says to collect per-host CPU and memory usage at a fixed interval and store it.
+  The PRD does not say what one sample holds, how it is stored, how long it is kept, or where the
+  loop runs. Q09 (rebalancer) needs "average CPU over the last W minutes" per host, and it must be
+  testable with FakeDriver.
+- **Decision:** New `HostStats(cpu_pct: float, mem_used_mb: int)` dataclass and HostDriver method
+  `host_stats(uri) -> HostStats` (HostUnreachable for an unknown/down host). `cpu_pct` is host-wide
+  busy CPU, 0..100. The libvirt driver (Q13) gets it from two `getCPUStats` samples about 0.5 s apart
+  and `getMemoryStats`. FakeDriver keeps `load: {cpu_pct, mem_used_mb}` in the host dict, set by the
+  test helper `set_load(uri, cpu_pct, mem_used_mb=None)` (ValueError outside 0..100). Without a set
+  load it returns `cpu_pct=0.0` and `mem_used_mb` = sum of `mem_mb` of running domains. It goes through
+  `_call`, so delay/fail injection works. Table `host_metrics` (revision 0006): `id bigserial PK`,
+  `host_id int NOT NULL FK hosts(id) ON DELETE CASCADE`, `collected_at timestamptz NOT NULL DEFAULT now()`,
+  `cpu_pct real NOT NULL CHECK 0..100`, `mem_used_mb int NOT NULL CHECK >= 0`, index
+  `(host_id, collected_at)`. `scheduler/collector.py` `collect_once(session_factory, driver, settings)`
+  reads hosts with status in `placement.PLACEABLE_STATUSES` (short session, no locks), calls the driver
+  outside any transaction, then inserts one row per answering host and runs
+  `DELETE ... WHERE collected_at < now() - retention`, all in one transaction. Timestamps come from the
+  DB clock. A host that fails is logged (`host_stats_failed`, host_id) and gets no row. New settings
+  `collector_interval_s = 10`, `metrics_retention_h = 24`. `collector.run_forever` copies the reconciler
+  loop pattern and runs as a `collector` thread in `worker_main`. It writes no tasks: a metric sample is an
+  observation, not a change to desired state (the reconciler already writes `actual_state` directly).
+- **Consequences:** Simple append-only table. At 3 hosts and 10 s it holds about 26k rows, and pruning is
+  one indexed DELETE per pass. Samples stop when the worker is down. That is acceptable because the
+  rebalancer also runs in the worker. Because the Fake's default load is 0 % CPU, nothing gets rebalanced
+  unless a test calls `set_load`. The libvirt `host_stats` call takes about 0.5 s per host, which is fine
+  at a 10 s interval.
+- **How to undo:** Drop the `collector` thread and revision 0006, then remove `host_stats` from the
+  protocol and FakeDriver. For longer history, add a downsampled rollup table instead of raising retention.
