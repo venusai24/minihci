@@ -1,6 +1,7 @@
 """MiniHCI CLI: a thin HTTP client over the REST API (D-029). Never touches the DB or drivers."""
 
 import json as jsonlib
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,7 +10,9 @@ import typer
 
 DEFAULT_API = "http://localhost:8000"
 EXIT_REJECTED = 1
+EXIT_TASK_FAILED = 2
 EXIT_UNREACHABLE = 3
+EXIT_TIMEOUT = 4
 
 app = typer.Typer(help="MiniHCI command line client", no_args_is_help=True)
 tasks_app = typer.Typer(help="Inspect tasks", no_args_is_help=True)
@@ -95,3 +98,58 @@ def tasks_list(ctx: typer.Context, state: str | None = typer.Option(None, "--sta
 @tasks_app.command("show")
 def tasks_show(ctx: typer.Context, task_id: int) -> None:
     output(ctx, request(ctx, "GET", f"/tasks/{task_id}"))
+
+
+IDEMPOTENCY_OPT = typer.Option(None, "--idempotency-key", help="Sent as Idempotency-Key")
+WAIT_OPT = typer.Option(False, "--wait", help="Wait for the task to finish")
+
+
+def wait_for_task(ctx: typer.Context, task_id: int, timeout: float, interval: float) -> None:
+    """Poll GET /tasks/{id}; exit 2 on failed/rolled_back, 4 on timeout."""
+    deadline = time.monotonic() + timeout
+    while True:
+        task = request(ctx, "GET", f"/tasks/{task_id}")
+        state = task.get("state")
+        if state == "succeeded":
+            typer.echo(f"task {task_id}: succeeded")
+            return
+        if state in ("failed", "rolled_back"):
+            _fail(f"task {task_id} {state}: {task.get('error')}", EXIT_TASK_FAILED)
+        if time.monotonic() >= deadline:
+            _fail(f"timed out waiting for task {task_id} (state {state})", EXIT_TIMEOUT)
+        time.sleep(interval)
+
+
+def submit(
+    ctx: typer.Context,
+    method: str,
+    path: str,
+    body: Any = None,
+    idempotency_key: str | None = None,
+    wait: bool = False,
+    timeout: float = 600,
+    interval: float = 1,
+) -> None:
+    """Shared path for mutating commands: send, print task_id (or 202 JSON), optionally wait."""
+    kw: dict[str, Any] = {}
+    if body is not None:
+        kw["json"] = body
+    if idempotency_key:
+        kw["headers"] = {"Idempotency-Key": idempotency_key}
+    data = request(ctx, method, path, **kw)
+    if ctx.obj.json:
+        typer.echo(jsonlib.dumps(data))
+    else:
+        typer.echo(str(data["task_id"]))
+    if wait:
+        wait_for_task(ctx, data["task_id"], timeout, interval)
+
+
+@tasks_app.command("wait")
+def tasks_wait(
+    ctx: typer.Context,
+    task_id: int,
+    timeout: float = typer.Option(600, "--timeout"),
+    interval: float = typer.Option(1, "--interval"),
+) -> None:
+    wait_for_task(ctx, task_id, timeout, interval)

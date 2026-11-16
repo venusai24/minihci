@@ -90,3 +90,108 @@ def test_default_base_url(monkeypatch):
     monkeypatch.delenv("MINIHCI_API", raising=False)
     runner.invoke(cli.app, ["tasks", "show", "7"])
     assert seen == ["http://localhost:8000"]
+
+
+def _seq(states, calls=None):
+    it = iter(states)
+    last = {}
+
+    def h(r):
+        if calls is not None:
+            calls.append((r.method, r.url.path))
+        nonlocal last
+        try:
+            last = next(it)
+        except StopIteration:
+            pass
+        return httpx.Response(200, json=last)
+
+    return h
+
+
+def test_wait_succeeds(monkeypatch):
+    calls = []
+    _install(monkeypatch, _seq([{**TASK, "state": s} for s in ("pending", "running", "succeeded")], calls))
+    res = runner.invoke(cli.app, ["tasks", "wait", "7", "--interval", "0"])
+    assert res.exit_code == 0, res.output
+    assert len(calls) == 3
+    assert "succeeded" in res.output
+
+
+def test_wait_failed_exit_2(monkeypatch):
+    _install(monkeypatch, _seq([{**TASK, "state": "running"}, {**TASK, "state": "failed", "error": "boom disk"}]))
+    res = runner.invoke(cli.app, ["tasks", "wait", "7", "--interval", "0"])
+    assert res.exit_code == 2
+    assert "boom disk" in res.stderr
+
+
+def test_wait_rolled_back_exit_2(monkeypatch):
+    _install(monkeypatch, _seq([{**TASK, "state": "rolled_back", "error": "undone"}]))
+    res = runner.invoke(cli.app, ["tasks", "wait", "7", "--interval", "0"])
+    assert res.exit_code == 2
+
+
+def test_wait_timeout_exit_4(monkeypatch):
+    _install(monkeypatch, _seq([{**TASK, "state": "pending"}]))
+    res = runner.invoke(cli.app, ["tasks", "wait", "7", "--timeout", "0", "--interval", "0"])
+    assert res.exit_code == 4
+
+
+def _mut_app():
+    import typer
+
+    app = typer.Typer()
+
+    @app.callback()
+    def main(ctx: typer.Context, json: bool = typer.Option(False, "--json")):
+        ctx.obj = cli.Ctx(api="http://x", json=json)
+
+    @app.command("poke")
+    def poke(
+        ctx: typer.Context,
+        idempotency_key: str | None = cli.IDEMPOTENCY_OPT,
+        wait: bool = cli.WAIT_OPT,
+    ):
+        cli.submit(ctx, "POST", "/things", {"a": 1}, idempotency_key, wait, timeout=5, interval=0)
+
+    return app
+
+
+def test_mutating_prints_task_id_and_key(monkeypatch):
+    seen = []
+
+    def h(r):
+        seen.append((r.method, r.url.path, r.headers.get("Idempotency-Key"), json.loads(r.content)))
+        return httpx.Response(202, json={"task_id": 42})
+
+    _install(monkeypatch, h)
+    res = runner.invoke(_mut_app(), ["poke", "--idempotency-key", "k1"])
+    assert res.exit_code == 0, res.output
+    assert res.stdout.strip() == "42"
+    assert seen == [("POST", "/things", "k1", {"a": 1})]
+
+
+def test_mutating_json_and_no_key(monkeypatch):
+    seen = []
+
+    def h(r):
+        seen.append(r.headers.get("Idempotency-Key"))
+        return httpx.Response(202, json={"task_id": 42})
+
+    _install(monkeypatch, h)
+    res = runner.invoke(_mut_app(), ["--json", "poke"])
+    assert json.loads(res.stdout) == {"task_id": 42}
+    assert seen == [None]
+
+
+def test_mutating_wait(monkeypatch):
+    def h(r):
+        if r.method == "POST":
+            return httpx.Response(202, json={"task_id": 42})
+        return httpx.Response(200, json={**TASK, "id": 42, "state": "failed", "error": "bad"})
+
+    _install(monkeypatch, h)
+    res = runner.invoke(_mut_app(), ["poke", "--wait"])
+    assert res.exit_code == 2
+    assert "42" in res.stdout
+    assert "bad" in res.stderr
