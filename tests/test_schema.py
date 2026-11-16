@@ -3,7 +3,7 @@ from alembic import command
 from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 
-from minihci.models import Host, HostMetric, Task, Vm
+from minihci.models import Host, HostMetric, Migration, Task, Vm
 from tests.dbutil import TEST_DB_URL, alembic_config, truncate_if_present
 
 
@@ -167,3 +167,56 @@ def test_host_metric_checks(session_factory, cpu, mem, name):
         s.add(HostMetric(host_id=h.id, cpu_pct=cpu, mem_used_mb=mem))
         with pytest.raises(IntegrityError, match=name):
             s.commit()
+
+
+def _migration_parts(s):
+    h1 = make_host(s, "h1")
+    h2 = make_host(s, "h2")
+    vm = _vm(h1)
+    t = Task(type="vm.migrate", target_id=1)
+    s.add_all([vm, t])
+    s.flush()
+    return h1, h2, vm, t
+
+
+def _mig(h1, h2, vm, t, **kw):
+    return Migration(task_id=t.id, vm_id=vm.id, src_host_id=h1.id, dst_host_id=h2.id, **kw)
+
+
+def test_migration_valid_row_defaults(session_factory):
+    with session_factory() as s:
+        s.add(_mig(*_migration_parts(s)))
+        s.commit()
+        m = s.scalars(select(Migration)).one()
+        assert m.status == "running"
+        assert m.started_at is not None
+        assert m.finished_at is None and m.duration_ms is None and m.downtime_ms is None
+
+
+@pytest.mark.parametrize("kw", [{"status": "bogus"}, {"downtime_ms": -1}, {"duration_ms": -1}])
+def test_migration_checks(session_factory, kw):
+    with session_factory() as s:
+        s.add(_mig(*_migration_parts(s), **kw))
+        with pytest.raises(IntegrityError, match="ck_migrations"):
+            s.commit()
+
+
+def test_migration_task_id_unique(session_factory):
+    with session_factory() as s:
+        parts = _migration_parts(s)
+        s.add(_mig(*parts))
+        s.commit()
+        s.add(_mig(*parts))
+        with pytest.raises(IntegrityError, match="uq_migrations_task_id"):
+            s.commit()
+
+
+def test_downgrade_to_0006_drops_migrations(engine):
+    cfg = alembic_config(TEST_DB_URL)
+    command.upgrade(cfg, "head")
+    try:
+        command.downgrade(cfg, "0006")
+        assert "migrations" not in inspect(engine).get_table_names()
+    finally:
+        command.upgrade(cfg, "head")
+    assert "migrations" in inspect(engine).get_table_names()

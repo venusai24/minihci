@@ -96,3 +96,24 @@ class HostMetric(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     cpu_pct: Mapped[float] = mapped_column(REAL)
     mem_used_mb: Mapped[int]
+
+
+class Migration(Base):
+    __tablename__ = "migrations"
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_migrations_task_id"),
+        CheckConstraint("status in ('running','succeeded','failed')", name="ck_migrations_status"),
+        CheckConstraint("duration_ms >= 0", name="ck_migrations_duration"),
+        CheckConstraint("downtime_ms >= 0", name="ck_migrations_downtime"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    vm_id: Mapped[int] = mapped_column(ForeignKey("vms.id"))
+    src_host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id"))
+    dst_host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id"))
+    status: Mapped[str] = mapped_column(default="running", server_default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None]
+    downtime_ms: Mapped[int | None]
