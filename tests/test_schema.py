@@ -3,7 +3,7 @@ from alembic import command
 from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 
-from minihci.models import Host, Task, Vm
+from minihci.models import Host, HostMetric, Task, Vm
 from tests.dbutil import TEST_DB_URL, alembic_config, truncate_if_present
 
 
@@ -145,4 +145,25 @@ def test_vm_actual_state_missing_accepted_and_bogus_rejected(session_factory):
         assert s.scalars(select(Vm)).one().actual_state == "missing"
         s.add(_vm(h, name="web2", path="/srv/w2.qcow2", actual_state="bogus"))
         with pytest.raises(IntegrityError, match="ck_vms_actual_state"):
+            s.commit()
+
+
+def test_host_metric_valid_row_has_server_default_time(session_factory):
+    with session_factory() as s:
+        h = make_host(s)
+        s.add(HostMetric(host_id=h.id, cpu_pct=42.5, mem_used_mb=1024))
+        s.commit()
+        m = s.scalars(select(HostMetric)).one()
+        assert m.collected_at is not None
+        assert m.cpu_pct == 42.5
+
+
+@pytest.mark.parametrize(
+    ("cpu", "mem", "name"), [(101, 10, "ck_host_metrics_cpu_pct"), (10, -1, "ck_host_metrics_mem")]
+)
+def test_host_metric_checks(session_factory, cpu, mem, name):
+    with session_factory() as s:
+        h = make_host(s)
+        s.add(HostMetric(host_id=h.id, cpu_pct=cpu, mem_used_mb=mem))
+        with pytest.raises(IntegrityError, match=name):
             s.commit()

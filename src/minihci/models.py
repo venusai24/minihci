@@ -1,8 +1,8 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, String, UniqueConstraint, func, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, UniqueConstraint, func, text
+from sqlalchemy.dialects.postgresql import JSONB, REAL
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -81,3 +81,18 @@ class SchedulerConfig(Base):
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     cpu_headroom_pct: Mapped[int] = mapped_column(default=80, server_default="80")
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class HostMetric(Base):
+    __tablename__ = "host_metrics"
+    __table_args__ = (
+        CheckConstraint("cpu_pct between 0 and 100", name="ck_host_metrics_cpu_pct"),
+        CheckConstraint("mem_used_mb >= 0", name="ck_host_metrics_mem"),
+        Index("ix_host_metrics_host_time", "host_id", "collected_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id", ondelete="CASCADE"))
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    cpu_pct: Mapped[float] = mapped_column(REAL)
+    mem_used_mb: Mapped[int]
