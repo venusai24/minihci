@@ -13,6 +13,7 @@ from minihci import reconcile
 from minihci.config import Settings
 from minihci.db import make_engine, make_session_factory
 from minihci.driver import build_driver
+from minihci.ha import heartbeat
 from minihci.logging import configure_logging
 from minihci.scheduler import collector, rebalancer
 from minihci.tasks.recovery import recover_orphans
@@ -89,6 +90,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         threads.append(
             threading.Thread(target=rebalancer.run_forever, args=(stop, session_factory, settings), name="rebalancer")
+        )
+        threads.append(
+            threading.Thread(
+                target=heartbeat.run_forever, args=(stop, session_factory, driver, settings), name="heartbeat"
+            )
         )
         for th in threads:
             th.start()
