@@ -22,5 +22,9 @@ class Settings(BaseSettings):
     collector_interval_s: float = 10
     rebalance_interval_s: float = 30
     metrics_retention_h: float = 24
+    heartbeat_interval_s: float = 5
+    heartbeat_ping_timeout_s: float = 3
+    heartbeat_suspect_misses: int = 3
+    heartbeat_dead_after_s: float = 30
     max_attempts: int = 3
     vm_shutdown_timeout_s: float = 60
