@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from minihci.config import Settings
 from minihci.driver.base import HostDriver
+from minihci.ha.failover import failover_once
 from minihci.ha.health import next_health
 from minihci.models import Host
 
@@ -86,4 +87,8 @@ def run_forever(stop: threading.Event, session_factory, driver: HostDriver, sett
             heartbeat_once(session_factory, driver, settings)
         except Exception:
             log.exception("heartbeat pass failed")
+        try:
+            failover_once(session_factory, settings)
+        except Exception:
+            log.exception("failover pass failed")
         stop.wait(settings.heartbeat_interval_s)
