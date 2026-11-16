@@ -1,6 +1,7 @@
 """One rebalancer pass (FR-3.4, D-025). Reads the DB only, never calls a driver; only enqueues vm.migrate."""
 
 import logging
+import threading
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -130,3 +131,12 @@ def rebalance_once(session_factory: sessionmaker[Session], settings: Settings) -
         },
     )
     return move
+
+
+def run_forever(stop: threading.Event, session_factory: sessionmaker[Session], settings: Settings) -> None:
+    while not stop.is_set():
+        try:
+            rebalance_once(session_factory, settings)
+        except Exception:
+            log.exception("rebalance pass failed")
+        stop.wait(settings.rebalance_interval_s)

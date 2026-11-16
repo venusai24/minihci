@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     worker_poll_interval_s: float = 0.2
     reconcile_interval_s: float = 30
     collector_interval_s: float = 10
+    rebalance_interval_s: float = 30
     metrics_retention_h: float = 24
     max_attempts: int = 3
     vm_shutdown_timeout_s: float = 60
