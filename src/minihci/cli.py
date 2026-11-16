@@ -153,3 +153,38 @@ def tasks_wait(
     interval: float = typer.Option(1, "--interval"),
 ) -> None:
     wait_for_task(ctx, task_id, timeout, interval)
+
+
+hosts_app = typer.Typer(help="Manage hosts", no_args_is_help=True)
+app.add_typer(hosts_app, name="hosts")
+
+
+@hosts_app.command("add")
+def hosts_add(
+    ctx: typer.Context,
+    name: str,
+    uri: str,
+    idempotency_key: str | None = IDEMPOTENCY_OPT,
+    wait: bool = WAIT_OPT,
+) -> None:
+    submit(ctx, "POST", "/hosts", {"name": name, "libvirt_uri": uri}, idempotency_key, wait)
+
+
+@hosts_app.command("list")
+def hosts_list(ctx: typer.Context) -> None:
+    output(ctx, request(ctx, "GET", "/hosts"), ["id", "name", "status"])
+
+
+@hosts_app.command("rm")
+def hosts_rm(
+    ctx: typer.Context,
+    host_id: int,
+    idempotency_key: str | None = IDEMPOTENCY_OPT,
+    wait: bool = WAIT_OPT,
+) -> None:
+    submit(ctx, "DELETE", f"/hosts/{host_id}", None, idempotency_key, wait)
+
+
+@hosts_app.command("health")
+def hosts_health(ctx: typer.Context, host_id: int) -> None:
+    output(ctx, request(ctx, "GET", f"/hosts/{host_id}/health"))

@@ -195,3 +195,60 @@ def test_mutating_wait(monkeypatch):
     assert res.exit_code == 2
     assert "42" in res.stdout
     assert "bad" in res.stderr
+
+
+def test_hosts_add_with_key(monkeypatch):
+    seen = []
+
+    def h(r):
+        seen.append((r.method, r.url.path, r.headers.get("Idempotency-Key"), json.loads(r.content)))
+        return httpx.Response(202, json={"task_id": 5})
+
+    _install(monkeypatch, h)
+    res = runner.invoke(cli.app, ["hosts", "add", "h1", "qemu+ssh://h1/system", "--idempotency-key", "k"])
+    assert res.exit_code == 0, res.output
+    assert res.stdout.strip() == "5"
+    assert seen == [("POST", "/hosts", "k", {"name": "h1", "libvirt_uri": "qemu+ssh://h1/system"})]
+
+
+def test_hosts_add_conflict(monkeypatch):
+    _install(monkeypatch, lambda r: httpx.Response(409, json={"detail": "host exists"}))
+    res = runner.invoke(cli.app, ["hosts", "add", "h1", "u"])
+    assert res.exit_code == 1
+    assert "host exists" in res.stderr
+
+
+def test_hosts_list_table(monkeypatch):
+    _install(monkeypatch, lambda r: httpx.Response(200, json=[{"id": 3, "name": "h3", "status": "active"}]))
+    res = runner.invoke(cli.app, ["hosts", "list"])
+    assert res.exit_code == 0, res.output
+    lines = res.stdout.splitlines()
+    assert lines[0].split() == ["ID", "NAME", "STATUS"]
+    assert lines[1].split() == ["3", "h3", "active"]
+
+
+def test_hosts_rm(monkeypatch):
+    seen = []
+
+    def h(r):
+        seen.append((r.method, r.url.path))
+        return httpx.Response(202, json={"task_id": 9})
+
+    _install(monkeypatch, h)
+    res = runner.invoke(cli.app, ["hosts", "rm", "3"])
+    assert res.exit_code == 0, res.output
+    assert seen == [("DELETE", "/hosts/3")]
+
+
+def test_hosts_health(monkeypatch):
+    seen = []
+
+    def h(r):
+        seen.append((r.method, r.url.path))
+        return httpx.Response(200, json={"host_id": 3, "healthy": True})
+
+    _install(monkeypatch, h)
+    res = runner.invoke(cli.app, ["hosts", "health", "3"])
+    assert res.exit_code == 0, res.output
+    assert seen == [("GET", "/hosts/3/health")]
+    assert "healthy: True" in res.stdout
