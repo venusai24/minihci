@@ -34,18 +34,22 @@ class DbCollector:
 
     def _migrations(self) -> Iterator[Metric]:
         with self._sf() as s:
-            rows = s.execute(
-                select(Migration.duration_ms, Migration.downtime_ms).where(
-                    Migration.status == "succeeded",
-                    Migration.duration_ms.is_not(None),
-                    Migration.downtime_ms.is_not(None),
-                )
-            ).all()
-        for idx, name, doc in (
-            (0, "minihci_migration_duration_seconds", "Migration duration in seconds"),
-            (1, "minihci_migration_downtime_seconds", "Migration downtime in seconds"),
+            cols = {
+                "minihci_migration_duration_seconds": Migration.duration_ms,
+                "minihci_migration_downtime_seconds": Migration.downtime_ms,
+            }
+            data = {
+                name: [
+                    r[0] / 1000.0
+                    for r in s.execute(select(col).where(Migration.status == "succeeded", col.is_not(None))).all()
+                ]
+                for name, col in cols.items()
+            }
+        for name, doc in (
+            ("minihci_migration_duration_seconds", "Migration duration in seconds"),
+            ("minihci_migration_downtime_seconds", "Migration downtime in seconds"),
         ):
-            vals = [r[idx] / 1000.0 for r in rows]
+            vals = data[name]
             h = HistogramMetricFamily(name, doc)
             buckets = [(str(float(b)), float(sum(v <= b for v in vals))) for b in MIGRATION_BUCKETS]
             buckets.append(("+Inf", float(len(vals))))

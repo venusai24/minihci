@@ -38,7 +38,7 @@ class DomainSpec:
 @dataclass(frozen=True)
 class MigrationResult:
     duration_ms: int
-    downtime_ms: int
+    downtime_ms: int | None
 
 
 class DomainState(StrEnum):

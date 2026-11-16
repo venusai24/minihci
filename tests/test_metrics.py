@@ -171,3 +171,35 @@ def test_metrics_migration_histograms_filled(session_factory):
     assert w["0.05"] == 1
     assert w["0.1"] == 1 and w["0.25"] == 2 and w["+Inf"] == 2
     assert w["count"] == 2 and abs(w["sum"] - 0.18) < 1e-9
+
+
+def test_metrics_migration_histograms_independent_nulls(session_factory):
+    from minihci.models import Host, Migration, Task, Vm
+
+    with session_factory() as s:
+        h1 = Host(name="h1", libvirt_uri="u://1", status="ready")
+        h2 = Host(name="h2", libvirt_uri="u://2", status="ready")
+        s.add_all([h1, h2])
+        s.flush()
+        vm = Vm(name="v0", host_id=h1.id, vcpus=1, mem_mb=128, image="i", disk_path="/d0")
+        t = Task(type="vm.migrate", target_id=0)
+        s.add_all([vm, t])
+        s.flush()
+        s.add(
+            Migration(
+                vm_id=vm.id,
+                src_host_id=h1.id,
+                dst_host_id=h2.id,
+                task_id=t.id,
+                status="succeeded",
+                duration_ms=500,
+                downtime_ms=None,
+            )
+        )
+        s.commit()
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    text = client.get("/metrics").text
+    d = _hist(text, "minihci_migration_duration_seconds")
+    assert d["count"] == 1 and abs(d["sum"] - 0.5) < 1e-9 and d["0.5"] == 1
+    w = _hist(text, "minihci_migration_downtime_seconds")
+    assert w["count"] == 0 and w["sum"] == 0
