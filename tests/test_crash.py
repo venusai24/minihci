@@ -4,12 +4,14 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from minihci.app import create_app
 from minihci.config import Settings
 from minihci.driver.fake import FakeDriver
-from minihci.models import Vm
+from minihci.models import Host, Migration, Vm
 from tests.helpers import add_ready_host, assert_db_matches_driver, drain, load_task, spawn_worker, wait_for
+from tests.test_vm_power import make_vm
 
 TERMINAL = ("succeeded", "failed", "rolled_back")
 STEP_TO_METHOD = {
@@ -144,4 +146,69 @@ def test_kill_mid_delete_then_restart_resumes(session_factory, tmp_path, step, w
         assert vm.desired_state == "absent" and vm.actual_state == "absent"
         assert driver.domain_state("qemu+ssh://a/system", "web1") is None
         assert not driver.disk_exists(vm.disk_path)
+    assert_db_matches_driver(session_factory, driver)
+
+
+MIGRATE_KILL_POINTS = [("migrate_live", where) for where in ("before", "after")]
+
+
+def start_migrate_and_kill(session_factory, tmp_path, where):
+    """Running VM on host a, POST a migrate to host b, let a slow worker reach migrate_live, SIGKILL it."""
+    state = tmp_path / "fake.json"
+    driver = FakeDriver(state_file=state)
+    src_id = add_ready_host(session_factory, driver)
+    dst_id = add_ready_host(session_factory, driver, name="b", uri="qemu+ssh://b/system")
+    vm_id = make_vm(session_factory, driver, src_id)
+    client = TestClient(create_app(Settings(storage_root="/srv/test-images"), session_factory=session_factory))
+    r = client.post(f"/vms/{vm_id}/migrate", json={"host_id": dst_id})
+    assert r.status_code == 202
+    tid = r.json()["task_id"]
+    env_key = "MINIHCI_FAKE_DELAYS" if where == "before" else "MINIHCI_FAKE_DELAYS_AFTER"
+    w1 = spawn_worker(state, {env_key: json.dumps({"migrate_live": 30})})
+    try:
+        wait_for(lambda: step_status(session_factory, tid, "migrate") == "running", timeout=10)
+        time.sleep(0.3)  # inside the injected sleep: migration applied iff where == "after"
+        w1.send_signal(signal.SIGKILL)
+        w1.wait(timeout=5)
+    finally:
+        if w1.poll() is None:
+            w1.kill()
+    assert load_task(session_factory, tid).state == "running"
+    fresh = FakeDriver(state_file=state)
+    with session_factory() as s:
+        vm = s.get(Vm, vm_id)
+        name = vm.name
+        assert vm.host_id == src_id
+    on_src = fresh.domain_state("qemu+ssh://a/system", name) is not None
+    on_dst = fresh.domain_state("qemu+ssh://b/system", name) is not None
+    assert (on_src, on_dst) == ((True, False) if where == "before" else (False, True))
+    return tid, state, vm_id, src_id, dst_id
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("step,where", MIGRATE_KILL_POINTS)
+def test_kill_mid_migrate_then_restart_leaves_vm_on_one_host(session_factory, tmp_path, step, where):
+    tid, state, vm_id, _src_id, dst_id = start_migrate_and_kill(session_factory, tmp_path, where)
+    w2 = spawn_worker(state)
+    try:
+        wait_for(lambda: load_task(session_factory, tid).state in TERMINAL, timeout=15)
+    finally:
+        w2.send_signal(signal.SIGTERM)
+        w2.wait(timeout=10)
+    t = load_task(session_factory, tid)
+    assert t.state == "succeeded", t.error
+    assert t.attempts == 2
+    driver = FakeDriver(state_file=state)
+    with session_factory() as s:
+        migs = list(s.scalars(select(Migration).where(Migration.task_id == tid)))
+        assert len(migs) == 1
+        assert migs[0].status == "succeeded" and migs[0].finished_at is not None
+        if where == "after":
+            assert migs[0].duration_ms is None
+        else:
+            assert migs[0].duration_ms is not None and migs[0].duration_ms >= 0
+        vm = s.get(Vm, vm_id)
+        placed = [h for h in s.scalars(select(Host)) if driver.domain_state(h.libvirt_uri, vm.name) is not None]
+        assert [h.id for h in placed] == [vm.host_id] == [dst_id]
+        assert vm.actual_state == "running"
     assert_db_matches_driver(session_factory, driver)
