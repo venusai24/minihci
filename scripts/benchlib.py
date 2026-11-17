@@ -79,6 +79,16 @@ def probe_paths(dr_root: str, name: str, run: str) -> dict:
     }
 
 
+def last_replica_id(rows: list[dict]) -> int:
+    """Newest replica id in a VM's replica list, or 0 when it has none."""
+    return max((r["id"] for r in rows), default=0)
+
+
+def rows_since(rows: list[dict], after_id: int) -> list[dict]:
+    """Only the replicas created after after_id (replica ids increase with creation)."""
+    return [r for r in rows if r["id"] > after_id]
+
+
 def format_probe_line(q: str, ok: bool, detail: str) -> str:
     return f"{q}: {'PASS' if ok else 'FAIL'} {detail}"
 

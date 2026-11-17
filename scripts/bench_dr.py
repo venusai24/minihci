@@ -65,6 +65,9 @@ def main(argv=None) -> int:
             f"/vms/{args.vm}/protection",
             json={"interval_s": INTERVAL_S, "retention": args.rounds + 1, "enabled": True},
         ).raise_for_status()
+        # Only this run's replicas: the VM's older replicas (idle periods, earlier runs) must not
+        # mix into the medians, or the table is labelled one method and holds another.
+        start_id = benchlib.last_replica_id(c.get(f"/vms/{args.vm}/replicas").raise_for_status().json())
         guest = guestlib.GuestConsole(uri, vm["name"])
         try:
             for i in range(args.rounds):
@@ -79,7 +82,7 @@ def main(argv=None) -> int:
                 print(f"round {i + 1}/{args.rounds} replicated", file=sys.stderr)
         finally:
             guest.close()
-        rows = c.get(f"/vms/{args.vm}/replicas").raise_for_status().json()
+        rows = benchlib.rows_since(c.get(f"/vms/{args.vm}/replicas").raise_for_status().json(), start_id)
     print(render_table(benchlib.summarise_replicas(rows), args.rounds, args.write_mib))
     return 0
 
