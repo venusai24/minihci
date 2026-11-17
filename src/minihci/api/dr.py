@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from minihci.api.deps import get_session
 from minihci.api.idempotency import fingerprint, run_idempotent
 from minihci.dr.chain import RPO_WINDOW, ReplicaInfo, rpo_status
-from minihci.models import Host, ProtectionPolicy, Replica, Task, Vm
+from minihci.models import DrFailover, Host, ProtectionPolicy, Replica, Task, Vm
 from minihci.scheduler.config import load_config
 from minihci.scheduler.placement import PLACEABLE_STATUSES, fits
 from minihci.tasks.engine import enqueue
@@ -161,6 +161,35 @@ def list_replicas(vm_id: int, session: Session = Depends(get_session)) -> list[d
     ]
 
 
+@router.get("/vms/{vm_id}/failovers")
+def list_failovers(vm_id: int, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    """FR-5.4: the stored failover numbers, newest first. data_loss_s is a lower bound (D-037): it is measured from
+    the old host's last heartbeat, which precedes the real failure, and is null for a forced failover of a live host;
+    failover_ms runs from the task's record step to the switch."""
+    if session.get(Vm, vm_id) is None:
+        raise HTTPException(404, "vm not found")
+    rows = session.scalars(select(DrFailover).where(DrFailover.vm_id == vm_id).order_by(DrFailover.id.desc()))
+    return [
+        {
+            "id": r.id,
+            "vm_id": r.vm_id,
+            "task_id": r.task_id,
+            "replica_id": r.replica_id,
+            "from_host_id": r.from_host_id,
+            "dr_host_id": r.dr_host_id,
+            "forced": r.forced,
+            "primary_failed_at": _ts(r.primary_failed_at),
+            "started_at": _ts(r.started_at),
+            "running_at": _ts(r.running_at),
+            "failover_ms": r.failover_ms,
+            "data_loss_s": r.data_loss_s,
+            "from_disk_path": r.from_disk_path,
+            "disk_path": r.disk_path,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/replication")
 def replication(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     now = _now()
@@ -201,6 +230,10 @@ def failover_vm(
         src = s.get(Host, vm.host_id)
         if src.site == "dr":
             raise HTTPException(409, "vm already runs at the DR site")
+        if vm.desired_state == "stopped":
+            raise HTTPException(
+                409, "vm is stopped; failover would start a VM the user stopped; start it first or use host.reclaim"
+            )
         if src.status != "dead" and not body.force:
             raise HTTPException(409, f"host {src.name} is {src.status}, not dead; use force to fail over anyway")
         if body.replica_id is not None:

@@ -384,3 +384,84 @@ def test_prune_sweeps_dead_rows_but_not_open_ones(session_factory, driver, vm, m
     assert by_id[row1.id].status == "failed" and not driver.disk_exists(row1.dr_path)
     assert by_id[row2.id].status == "failed" and not driver.disk_exists(row2.dr_path)
     assert by_id[row3.id].status == "running" and driver.disk_exists(row3.dr_path)
+
+
+def test_failed_incremental_falls_back_to_full(session_factory, driver, vm, caplog, monkeypatch):
+    """F1: after a qemu kill the last checkpoint can be listed while its qcow2 bitmap is gone, so every incremental
+    from it fails. The next replica after a failed incremental must be a full copy, not the same incremental again."""
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    driver.write_blocks(URI, "web1", [1, 2, 3])
+    assert replicate(session_factory, driver, vm).state == "succeeded"
+    driver.write_blocks(URI, "web1", [2, 7])
+    driver.fail_next_incremental = 100  # the bitmap is gone: every incremental fails until a full copy is taken
+    assert replicate(session_factory, driver, vm).state == "rolled_back"
+    with caplog.at_level(logging.INFO):
+        assert replicate(session_factory, driver, vm).state == "succeeded"
+    _first, failed, full = rows(session_factory)
+    assert (failed.mode, failed.status) == ("incremental", "failed")
+    assert (full.mode, full.status, full.chain_id, full.seq) == ("full", "succeeded", full.id, 0)
+    fallback = [r for r in caplog.records if getattr(r, "fields", {}).get("event") == "replica_full_fallback"]
+    assert [r.fields["reason"] for r in fallback] == ["incremental_failed"]
+    assert driver.read_disk(full.dr_path) == driver.read_disk(disk_path(session_factory, vm))
+    # the bitmap is fresh again: the chain continues incrementally on the new full and compares equal
+    driver.fail_next_incremental = 0
+    driver.write_blocks(URI, "web1", [9])
+    assert replicate(session_factory, driver, vm).state == "succeeded"
+    nxt = rows(session_factory)[-1]
+    assert (nxt.mode, nxt.chain_id, nxt.backing_path) == ("incremental", full.id, full.dr_path)
+    assert driver.read_disk(nxt.dr_path) == driver.read_disk(disk_path(session_factory, vm))
+
+
+def test_prune_never_deletes_a_backing_file_under_a_live_child(session_factory, driver, host_id, monkeypatch):
+    """F9: chain full+incr+incr is doomed and the top incremental's delete fails: its parents (the files it is backed
+    by) must stay with their rows unpruned, the failed row stays retriable, and other doomed chains are still pruned."""
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    vm_id = make_vm(session_factory, driver, host_id)
+    protect(session_factory, vm_id, retention=3)
+    for i in range(9):  # retention 3: chains (1,2,3), (4,5,6), (7,8,9)
+        driver.write_blocks(URI, "web1", [i])
+        assert replicate(session_factory, driver, vm_id).state == "succeeded"
+    allrows = rows(session_factory)
+    assert [(r.mode, r.seq) for r in allrows] == [("full", 0), ("incremental", 1), ("incremental", 2)] * 3
+    c1, c2 = allrows[0:3], allrows[3:6]
+    # bring the two old chains back as succeeded rows with their files, so this prune pass has both to do
+    with session_factory() as s, s.begin():
+        for r in c1 + c2:
+            s.get(Replica, r.id).status = "succeeded"
+    for r in c1 + c2:
+        driver.create_blank_disk(r.dr_path, like=disk_path(session_factory, vm_id))
+    top = c1[2]
+    failing_delete(driver, monkeypatch, {top.dr_path})
+    vr.prune(step_ctx(session_factory, driver, vm_id))  # must not raise
+    by_id = {r.id: r for r in rows(session_factory)}
+    for r in c1:  # the top could not be deleted, so its backing chain stays whole
+        assert by_id[r.id].status == "succeeded", r.seq
+        assert driver.disk_exists(r.dr_path), r.seq
+    for r in c2:  # the other doomed chain is pruned in the same pass
+        assert by_id[r.id].status == "pruned" and not driver.disk_exists(r.dr_path), r.seq
+    # the next pass retries the failed row and, once it goes, the parents after it
+    monkeypatch.undo()
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    vr.prune(step_ctx(session_factory, driver, vm_id))
+    by_id = {r.id: r for r in rows(session_factory)}
+    for r in c1:
+        assert by_id[r.id].status == "pruned" and not driver.disk_exists(r.dr_path), r.seq
+
+
+def test_snapshot_time_and_finished_at_use_one_clock(session_factory, driver, vm, monkeypatch):
+    """F-clocks: achieved_rpo_s = finished_at - snapshot_time, so both must come from the worker's clock, not one
+    from Python and one from the DB (skew between them would corrupt the RPO)."""
+    from datetime import UTC, datetime
+
+    t = datetime(2020, 5, 5, 5, 5, 5, tzinfo=UTC)  # far from the DB clock, so a DB-stamped value cannot match
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return t if tz is not None else t.replace(tzinfo=None)
+
+    monkeypatch.setattr(vr, "datetime", FakeDateTime)
+    assert replicate(session_factory, driver, vm).state == "succeeded"
+    (row,) = rows(session_factory)
+    assert row.snapshot_time == t
+    assert row.finished_at == t

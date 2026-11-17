@@ -239,4 +239,10 @@ def test_auth_required_when_token_set(session_factory):
     c = TestClient(create_app(Settings(api_token="s3cret"), session_factory=session_factory))
     assert c.get("/replication").status_code == 401
     assert c.put("/vms/1/protection", json=BODY).status_code == 401
+    assert c.get("/vms/1/failovers").status_code == 401
     assert c.get("/replication", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+
+
+def test_failovers_404_and_empty(client, vm):
+    assert client.get("/vms/9999/failovers").status_code == 404
+    assert client.get(f"/vms/{vm}/failovers").json() == []

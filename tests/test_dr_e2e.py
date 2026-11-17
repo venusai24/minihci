@@ -112,6 +112,19 @@ def test_site_loss_failover_within_rpo(session_factory, clock):
     assert row.data_loss_s == pytest.approx(10.0)
     assert row.data_loss_s <= INTERVAL + RPO_SLACK_S
 
+    # F7 / FR-5.4: the failover numbers are readable through the API, newest first
+    r = client.get(f"/vms/{vm}/failovers")
+    assert r.status_code == 200, r.text
+    (api_row,) = r.json()
+    assert (api_row["id"], api_row["task_id"], api_row["vm_id"]) == (row.id, tid, vm)
+    assert (api_row["replica_id"], api_row["from_host_id"], api_row["dr_host_id"]) == (last.id, a, dr)
+    assert api_row["forced"] is False
+    assert api_row["data_loss_s"] == pytest.approx(10.0)
+    assert isinstance(api_row["failover_ms"], int) and 0 <= api_row["failover_ms"] == row.failover_ms
+    assert api_row["primary_failed_at"] == "2026-03-01T12:03:10Z"
+    assert api_row["started_at"] is not None and api_row["running_at"] is not None
+    assert api_row["disk_path"] == row.disk_path and api_row["from_disk_path"] == disk
+
     # the HA pass and the replication scheduler leave the failed-over VM alone
     failover_once(session_factory, S)
     replicated = replicate_once(session_factory, S, now=t3 + timedelta(hours=1))
@@ -119,3 +132,52 @@ def test_site_loss_failover_within_rpo(session_factory, clock):
         assert s.scalars(select(Task).where(Task.type == "vm.ha_restart")).all() == []
         assert s.get(Vm, vm).actual_state == "running"
     assert replicated == []
+
+
+def test_replicate_after_live_migration_is_full(session_factory, clock, caplog):
+    """F8: full, incremental, live migration to another primary host, then the next replica is a FULL copy with
+    reason checkpoint_missing (checkpoints do not travel, probe Q4) and the new chain equals the source disk."""
+    import logging
+
+    from tests.test_vm_migrate import migrate
+
+    driver = FakeDriver()
+    a = add_ready_host(session_factory, driver, name="a", uri=URI)
+    b = add_ready_host(session_factory, driver, name="b", uri=URI_B)
+    vm = make_vm(session_factory, driver, a)
+    with session_factory() as s, s.begin():
+        s.add(ProtectionPolicy(vm_id=vm, interval_s=INTERVAL, retention=3, enabled=True))
+        disk = s.get(Vm, vm).disk_path
+    for k in range(2):
+        clock[0] = BASE + timedelta(seconds=INTERVAL * k)
+        driver.write_blocks(URI, "web1", [k, 10 + k])
+        assert len(replicate_once(session_factory, S, now=clock[0])) == 1
+        drain(session_factory, driver)
+    assert migrate(session_factory, driver, vm, a, b).state == "succeeded"
+    assert driver.list_checkpoints(URI_B, "web1") == []
+    driver.write_blocks(URI_B, "web1", [3, 20])
+    clock[0] = BASE + timedelta(seconds=INTERVAL * 2)
+    with caplog.at_level(logging.INFO):
+        assert len(replicate_once(session_factory, S, now=clock[0])) == 1
+        drain(session_factory, driver)
+    with session_factory() as s:
+        reps = list(s.scalars(select(Replica).where(Replica.vm_id == vm).order_by(Replica.id)))
+    assert [(r.mode, r.status) for r in reps] == [
+        ("full", "succeeded"),
+        ("incremental", "succeeded"),
+        ("full", "succeeded"),
+    ]
+    new = reps[-1]
+    assert (new.host_id, new.chain_id, new.seq) == (b, new.id, 0)
+    fallback = [r for r in caplog.records if getattr(r, "fields", {}).get("event") == "replica_full_fallback"]
+    assert [r.fields["reason"] for r in fallback] == ["checkpoint_missing"]
+    assert driver.read_disk(new.dr_path) == driver.read_disk(disk)
+    # and the chain continues incrementally from the new full
+    driver.write_blocks(URI_B, "web1", [4])
+    clock[0] = BASE + timedelta(seconds=INTERVAL * 3)
+    assert len(replicate_once(session_factory, S, now=clock[0])) == 1
+    drain(session_factory, driver)
+    with session_factory() as s:
+        top = s.scalars(select(Replica).where(Replica.vm_id == vm).order_by(Replica.id.desc())).first()
+    assert (top.mode, top.chain_id) == ("incremental", new.id)
+    assert driver.read_disk(top.dr_path) == driver.read_disk(disk)

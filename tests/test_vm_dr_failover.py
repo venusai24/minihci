@@ -3,7 +3,7 @@ from datetime import UTC, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from minihci.app import create_app
 from minihci.config import Settings
@@ -268,10 +268,54 @@ def test_force_destroys_reachable_primary(client, session_factory, driver, host,
     driver.calls.clear()
     drain(session_factory, driver)
     assert load_task(session_factory, tid).state == "succeeded"
-    assert driver.domain_state(URI, "web1") == DomainState.SHUT_OFF
+    # F2: the destroyed primary domain is also undefined (the live host never goes dead, so host.reclaim would
+    # never remove it), but its disk stays as the VM's pre-failover copy
+    assert driver.domain_state(URI, "web1") is None
+    row = fo_row(session_factory, tid)
+    assert driver.disk_exists(row.from_disk_path)
     assert driver.domain_state(URI_DR, "web1") == DomainState.RUNNING
     assert driver.calls.index(("destroy_domain", URI, "web1")) < driver.calls.index(("start_domain", URI_DR, "web1"))
-    assert fo_row(session_factory, tid).data_loss_s is None
+    assert row.data_loss_s is None
+
+
+@pytest.mark.parametrize("error", ["driver", "unreachable"])
+def test_force_primary_undefine_failure_never_fails_the_failover(
+    client, session_factory, driver, host, dr_host, vm, replicas, caplog, monkeypatch, error
+):
+    """F2: the fence is effective once the domain is destroyed; an undefine failure is logged and swallowed."""
+    from minihci.driver.base import DriverError, HostUnreachable
+
+    def undefine_domain(uri, name):
+        if uri == URI:
+            raise DriverError("injected") if error == "driver" else HostUnreachable("gone")
+        return FakeDriver.undefine_domain(driver, uri, name)
+
+    monkeypatch.setattr(driver, "undefine_domain", undefine_domain)
+    tid = failover(client, vm, force=True).json()["task_id"]
+    with caplog.at_level(logging.INFO, logger="minihci.tasks"):
+        drain(session_factory, driver)
+    assert load_task(session_factory, tid).state == "succeeded"
+    assert driver.domain_state(URI, "web1") == DomainState.SHUT_OFF  # left for host.reclaim
+    assert driver.domain_state(URI_DR, "web1") == DomainState.RUNNING
+    assert vm_row(session_factory, vm).host_id == dr_host
+    warned = [
+        r for r in caplog.records if getattr(r, "fields", {}).get("event") == "dr_failover_primary_undefine_failed"
+    ]
+    assert len(warned) == 1 and warned[0].fields["vm_id"] == vm
+
+
+def test_release_primary_leaves_an_active_primary_domain_alone(session_factory, driver, host, dr_host, vm, replicas):
+    """Never touch an active domain: only a destroyed/shut-off leftover is undefined."""
+    from minihci.tasks.types import vm_dr_failover as fo
+
+    ctx = step_ctx(session_factory, driver, vm, replicas[-1].id, dr_host, force=True)
+    fo.record(ctx)
+    fo.release_primary(ctx)  # before the switch: nothing to release
+    assert driver.domain_state(URI, "web1") == DomainState.RUNNING
+    for step in (fo.prepare_disk, fo.define_domain, fo.start_domain, fo.switch):
+        step(ctx)
+    fo.release_primary(ctx)  # the primary was never fenced in this hand-run: it is active, leave it
+    assert driver.domain_state(URI, "web1") == DomainState.RUNNING
 
 
 def test_force_treats_unreachable_primary_as_fenced(client, session_factory, driver, host, dr_host, vm, replicas):
@@ -444,7 +488,8 @@ def test_each_step_safe_to_rerun(session_factory, driver, host, dr_host, vm, rep
 
     kill_primary(session_factory, driver, host, replicas[-1])
     ctx = step_ctx(session_factory, driver, vm, replicas[-1].id, dr_host)
-    for step in (fo.record, fo.fence_primary, fo.prepare_disk, fo.define_domain, fo.start_domain, fo.switch):
+    steps = (fo.record, fo.fence_primary, fo.prepare_disk, fo.define_domain, fo.start_domain, fo.switch)
+    for step in (*steps, fo.release_primary):
         step(ctx)
         before = _snapshot(session_factory, driver, ctx)
         step(ctx)
@@ -645,3 +690,30 @@ def test_undo_define_destroys_own_domain_when_undo_start_failed(session_factory,
     assert driver.domain_state(URI_DR, "web1") == DomainState.RUNNING
     fo.undo_define_domain(ctx)  # this task's start ran: the active domain is ours
     assert driver.domain_state(URI_DR, "web1") is None
+
+
+def test_data_loss_clamped_at_zero(client, session_factory, driver, host, dr_host, vm, replicas):
+    """F-clamp: data_loss_s derives from the last heartbeat, which precedes the real failure, so it is a lower bound;
+    a heartbeat earlier than the replica's snapshot_time (clock skew) must give 0, never a negative loss."""
+    kill_primary(session_factory, driver, host, replicas[-1], after_s=-5)
+    tid = failover(client, vm).json()["task_id"]
+    drain(session_factory, driver)
+    assert load_task(session_factory, tid).state == "succeeded"
+    assert fo_row(session_factory, tid).data_loss_s == 0
+
+
+@pytest.mark.parametrize("body", [{}, {"force": True}])
+def test_stopped_vm_409_without_task(client, session_factory, driver, host, dr_host, vm, replicas, body):
+    """F12: a failover would start a VM the user stopped; refused before any task row is written."""
+    kill_primary(session_factory, driver, host, replicas[-1])
+    with session_factory() as s, s.begin():
+        s.get(Vm, vm).desired_state = "stopped"
+    with session_factory() as s:
+        before = s.scalar(select(func.count()).select_from(Task))
+    r = failover(client, vm, **body)
+    assert r.status_code == 409
+    assert r.json()["detail"] == (
+        "vm is stopped; failover would start a VM the user stopped; start it first or use host.reclaim"
+    )
+    with session_factory() as s:
+        assert s.scalar(select(func.count()).select_from(Task)) == before

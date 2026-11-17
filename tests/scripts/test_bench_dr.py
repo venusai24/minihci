@@ -117,6 +117,32 @@ def test_wait_all_dead_uses_own_deadline_and_times_out():
     assert acceptance_m5.wait_all_dead(lambda: len(n.append(1) or n) >= 3, 10, sleep=sleep, now=lambda: clock[0])
 
 
+def test_task_id_from_cli_reads_first_json_line():
+    # the CLI in --json mode with waiting prints the 202 JSON, then a text line from the wait
+    assert acceptance_m5.task_id_from_cli('{"task_id": 7, "target_id": 1}\ntask 7: succeeded\n') == 7
+    assert acceptance_m5.task_id_from_cli("7\ntask 7: succeeded\n") is None
+    assert acceptance_m5.task_id_from_cli("") is None
+    assert acceptance_m5.task_id_from_cli("{not json\n") is None
+
+
+def test_failover_numbers_from_api_rows():
+    rows = [
+        {"task_id": 9, "data_loss_s": 12.5, "failover_ms": 840},
+        {"task_id": 4, "data_loss_s": 3.0, "failover_ms": 100},
+    ]
+    assert acceptance_m5.failover_numbers(rows, 9) == (12.5, 840)
+    assert acceptance_m5.failover_numbers(rows, 4) == (3.0, 100)
+    # honest fallback: no matching row (or no task id) gives n/a, never another failover's numbers
+    assert acceptance_m5.failover_numbers(rows, 99) == (None, None)
+    assert acceptance_m5.failover_numbers(rows, None) == (None, None)
+    assert acceptance_m5.failover_numbers([{"task_id": 9, "data_loss_s": None, "failover_ms": 5}], 9) == (None, 5)
+
+
+def test_api_value_label():
+    assert acceptance_m5.api_value(None) == "n/a (not reported by the API)"
+    assert acceptance_m5.api_value(12.5) == "12.5"
+
+
 def test_scripts_refuse_without_env(tmp_path):
     env = {k: v for k, v in os.environ.items() if k != "MINIHCI_REAL_HOSTS"}
     env["PYTHONPATH"] = str(ROOT)

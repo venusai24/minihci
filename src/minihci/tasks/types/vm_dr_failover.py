@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from minihci.driver.base import DomainSpec, DomainState, HostUnreachable
+from minihci.driver.base import DomainSpec, DomainState, DriverError, HostUnreachable
 from minihci.models import DrFailover, Host, ProtectionPolicy, Replica, Task, Vm
 from minihci.tasks.executor import Step, StepContext, TaskType
 from minihci.tasks.locks import LOCK_NAMESPACE
@@ -245,7 +245,9 @@ def switch(ctx: StepContext) -> None:
             row.failover_ms = min(2**31 - 1, max(0, ms))
             replica = s.get(Replica, row.replica_id)
             if row.primary_failed_at is not None and replica.snapshot_time is not None:
-                row.data_loss_s = (_aware(row.primary_failed_at) - _aware(replica.snapshot_time)).total_seconds()
+                # a lower bound: the last heartbeat precedes the real failure; clamp clock skew at 0
+                loss = (_aware(row.primary_failed_at) - _aware(replica.snapshot_time)).total_seconds()
+                row.data_loss_s = max(0.0, loss)
         fields = {
             "event": "dr_failover_running",
             "vm_id": vm.id,
@@ -256,6 +258,52 @@ def switch(ctx: StepContext) -> None:
             "data_loss_s": row.data_loss_s,
         }
     ctx.log.info("dr_failover_running", extra={"fields": fields})
+
+
+def release_primary(ctx: StepContext) -> None:
+    """Best effort, after the switch: undefine the old primary domain if it is still defined and not active (the
+    domain the forced fence destroyed, or a shut-off leftover on a reachable "dead" host). A live host never goes
+    dead, so host.reclaim would never remove it, and reconcile would report it as unknown_domain forever and block a
+    later vm.create of that name there. undefine_domain never deletes a disk: the old disk (from_disk_path) stays as
+    the VM's pre-failover copy. The fence was already effective, so a failure here is logged and never fails the
+    task; host.reclaim covers a domain left behind. It runs after `switch` (not inside fence_primary) so a failover
+    that rolls back still leaves the primary domain defined and startable."""
+    row = _need_row(ctx)
+    if row.running_at is None:
+        return  # not switched (only reachable when run by hand): the primary domain is still the VM
+    vm = _vm(ctx)
+    try:
+        uri = _uri(ctx, row.from_host_id)
+        state = ctx.driver.domain_state(uri, vm.name)
+        if state is None:
+            return  # already gone (a rerun, or host.reclaim)
+        if state.active:
+            ctx.log.warning(
+                "dr_failover_primary_active_kept",
+                extra={
+                    "fields": {"event": "dr_failover_primary_active_kept", "vm_id": vm.id, "host_id": row.from_host_id}
+                },
+            )
+            return
+        ctx.driver.undefine_domain(uri, vm.name)
+    except (HostUnreachable, DriverError) as e:
+        ctx.log.warning(
+            "dr_failover_primary_undefine_failed: %s",
+            e,
+            extra={
+                "fields": {
+                    "event": "dr_failover_primary_undefine_failed",
+                    "vm_id": vm.id,
+                    "host_id": row.from_host_id,
+                    "error": str(e),
+                }
+            },
+        )
+        return
+    ctx.log.info(
+        "dr_failover_primary_undefined",
+        extra={"fields": {"event": "dr_failover_primary_undefined", "vm_id": vm.id, "host_id": row.from_host_id}},
+    )
 
 
 def log_rolled_back(ctx: StepContext) -> None:
@@ -283,6 +331,7 @@ VM_DR_FAILOVER = register(
             Step("define_domain", define_domain, undo_define_domain),
             Step("start_domain", start_domain, undo_start_domain),
             Step("switch", switch),
+            Step("release_primary", release_primary),
         ],
         log_rolled_back,
     )

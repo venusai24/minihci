@@ -60,9 +60,10 @@ class DbCollector:
             "minihci_replication_within_target", "1 when the VM meets its RPO target (D-036)", labels=["vm"]
         )
         for name, st in statuses:
-            if st["lag_s"] is not None:  # at least one replica
+            if st["lag_s"] is not None:  # lag only once there is a replica
                 lag.add_metric([name], st["lag_s"])
-                within.add_metric([name], 1.0 if st["within_target"] else 0.0)
+            # a protected VM with no succeeded replica yet is out of target (protection_status gives False)
+            within.add_metric([name], 1.0 if st["within_target"] else 0.0)
         yield lag
         yield within
         reps = GaugeMetricFamily("minihci_replicas", "Replicas by mode and status", labels=["mode", "status"])

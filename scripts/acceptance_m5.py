@@ -83,18 +83,31 @@ def run_site_loss(names, destroy, wait_dead, after, out) -> None:
             out(line)
 
 
-def find_key(obj, key):
-    """First value of `key` anywhere in a nested dict/list, else None."""
-    if isinstance(obj, dict):
-        if key in obj:
-            return obj[key]
-        obj = list(obj.values())
-    if isinstance(obj, list):
-        for v in obj:
-            r = find_key(v, key)
-            if r is not None:
-                return r
-    return None
+def task_id_from_cli(stdout: str) -> int | None:
+    """The task id from `minihci --json ... --wait` output: its first line is the 202 JSON, the wait adds text."""
+    lines = stdout.strip().splitlines()
+    if not lines:
+        return None
+    try:
+        data = json.loads(lines[0])
+    except ValueError:
+        return None
+    return data.get("task_id") if isinstance(data, dict) else None
+
+
+def failover_numbers(rows: list[dict], task_id: int | None) -> tuple[float | None, int | None]:
+    """(data_loss_s, failover_ms) of this run's failover from GET /vms/{id}/failovers; (None, None) when the row
+    cannot be identified, never the numbers of another failover."""
+    if task_id is None:
+        return None, None
+    row = next((r for r in rows if r.get("task_id") == task_id), None)
+    if row is None:
+        return None, None
+    return row.get("data_loss_s"), row.get("failover_ms")
+
+
+def api_value(v) -> str:
+    return "n/a (not reported by the API)" if v is None else str(v)
 
 
 def main(argv=None) -> int:
@@ -174,17 +187,18 @@ def main(argv=None) -> int:
             if not out:
                 raise SystemExit("no marker found on the DR copy (/root/marks empty)")
             state["last_mark"] = float(out[-1])
-            task_id = json.loads(r.stdout).get("task_id") if r.stdout.strip().startswith("{") else None
-            state["api_loss"] = None
-            if task_id is not None:
-                state["api_loss"] = find_key(c.get(f"/tasks/{task_id}").raise_for_status().json(), "data_loss_s")
+            rows = c.get(f"/vms/{args.vm}/failovers").raise_for_status().json()
+            state["api_loss"], state["api_ms"] = failover_numbers(rows, task_id_from_cli(r.stdout))
 
         run_site_loss(names, destroy, wait_dead, after, print)
-        last_mark, failover_s, api_loss = state["last_mark"], state["failover_s"], state["api_loss"]
+        last_mark, failover_s = state["last_mark"], state["failover_s"]
+        api_loss, api_ms = state["api_loss"], state["api_ms"]
 
     lost, ok = verdict(stop_at, last_mark, args.interval)
     print(f"data_lost_s={lost:.1f}")
-    print(f"api_data_loss_s={'n/a (not exposed by the API)' if api_loss is None else api_loss}")
+    # control-plane clock, from the last heartbeat: a lower bound; data_lost_s mixes laptop and guest clocks
+    print(f"api_data_loss_s={api_value(api_loss)} (lower bound)")
+    print(f"api_failover_ms={api_value(api_ms)}")
     print(f"failover_s={failover_s:.1f}")
     print(f"{'PASS' if ok else 'FAIL'}: data_lost_s <= interval + {SLACK_S} ({args.interval + SLACK_S})")
     return 0 if ok else 1

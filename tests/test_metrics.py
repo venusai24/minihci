@@ -355,3 +355,25 @@ def test_replication_metrics(session_factory, monkeypatch):
     assert reps[(("mode", "incremental"), ("status", "pruned"))] == 1
     assert reps[(("mode", "full"), ("status", "failed"))] == 1
     assert _samples(text, "minihci_replica_bytes") == {(("mode", "full"),): 1005.0, (("mode", "incremental"),): 57.0}
+
+
+def test_replication_metrics_never_replicated_vm_is_out_of_target(session_factory, monkeypatch):
+    """F-metric: a protected VM with no succeeded replica yet does not meet its RPO: within_target=0, no lag series."""
+    from datetime import datetime
+
+    from minihci.api import dr as dr_api
+    from minihci.models import Host, ProtectionPolicy, Vm
+
+    monkeypatch.setattr(dr_api, "_now", lambda: datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC))
+    with session_factory() as s, s.begin():
+        h = Host(name="h", libvirt_uri="u", status="ready", cpu_total=8, mem_total_mb=1024)
+        s.add(h)
+        s.flush()
+        v = Vm(name="fresh", host_id=h.id, vcpus=1, mem_mb=64, image="x", disk_path="/d/f", desired_state="running")
+        s.add(v)
+        s.flush()
+        s.add(ProtectionPolicy(vm_id=v.id, interval_s=60, retention=3, enabled=True))
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    text = client.get("/metrics").text
+    assert _samples(text, "minihci_replication_within_target") == {(("vm", "fresh"),): 0.0}
+    assert _samples(text, "minihci_replication_lag_seconds") == {}

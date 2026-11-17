@@ -51,6 +51,7 @@ def _handle(session_factory: sessionmaker[Session], vm_id: int, settings: Settin
         if open_task is not None:
             return None
         # tasks.finished_at is a naive UTC timestamp; replicas.snapshot_time is timestamptz.
+        # finished_at is treated as UTC (inherited convention: the DB session time zone is UTC).
         failed_at = s.scalar(
             select(func.max(Task.finished_at)).where(
                 Task.type == "vm.replicate", Task.target_id == vm_id, Task.state.in_(("failed", "rolled_back"))
@@ -71,12 +72,34 @@ def _handle(session_factory: sessionmaker[Session], vm_id: int, settings: Settin
     return task_id
 
 
+def max_open_replicas(settings: Settings) -> int:
+    """A backup holds a worker thread and the VM lock for up to backup_timeout_s: keep one worker thread free for
+    vm.ha_restart / vm.dr_failover and the rest of the queue."""
+    return max(1, settings.worker_threads - 1)
+
+
+def _open_replicas(session_factory: sessionmaker[Session]) -> int:
+    with session_factory() as s:
+        return (
+            s.scalar(
+                select(func.count())
+                .select_from(Task)
+                .where(Task.type == "vm.replicate", Task.state.in_(("pending", "running")))
+            )
+            or 0
+        )
+
+
 def replicate_once(
     session_factory: sessionmaker[Session], settings: Settings, now: datetime | None = None
 ) -> list[int]:
     now = now or datetime.now(UTC)
-    ids = []
+    ids: list[int] = []
+    # Level-triggered: a due VM that does not get a task because of the cap is picked up on a later pass.
+    budget = max_open_replicas(settings) - _open_replicas(session_factory)
     for vm_id in _candidates(session_factory):
+        if len(ids) >= budget:
+            break
         try:
             # the per-VM transaction is closed by _handle's context managers, so a failure releases the row lock
             task_id = _handle(session_factory, vm_id, settings, now)

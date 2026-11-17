@@ -100,3 +100,18 @@ def test_hottest_host_chosen():
     vms = [vm(1, 1), vm(2, 2), vm(3, 2)]
     hosts = [host(1), host(2), host(3)]
     assert run(hosts, {1: 85, 2: 95, 3: 5}, vms) == Move(2, 2, 3)
+
+
+def dr_host(i, cpu=8, mem=16000):
+    return NS(id=i, status="ready", cpu_total=cpu, mem_total_mb=mem, site="dr")
+
+
+def test_hot_dr_host_is_never_a_source():
+    """F3: moving a failed-over VM off a hot DR host to a primary host would be an accidental failback (D-037)."""
+    vms = [vm(1, 1), vm(2, 1)]
+    assert run([dr_host(1), host(2)], {1: 95, 2: 10}, vms) is None
+
+
+def test_hot_dr_host_does_not_hide_a_hot_primary():
+    vms = [vm(1, 1), vm(2, 1), vm(3, 2), vm(4, 2)]
+    assert run([dr_host(1), host(2), host(3)], {1: 99, 2: 90, 3: 10}, vms) == Move(3, 2, 3)

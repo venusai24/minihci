@@ -3,6 +3,7 @@
 No DB, driver or I/O imports: everything here is a function of its arguments.
 """
 
+import itertools
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
@@ -30,7 +31,7 @@ class NextReplica:
     chain_id: int | None
     seq: int
     # Why it is full: "first" | "checkpoint_missing" | "backing_missing" |
-    # "chain_full"; None for incremental.
+    # "incremental_failed" | "chain_full"; None for incremental.
     reason: str | None
 
 
@@ -49,9 +50,7 @@ def _by_age(replicas: list[ReplicaInfo]) -> list[ReplicaInfo]:
 
 
 def _full(reason: str) -> NextReplica:
-    return NextReplica(
-        mode="full", since=None, backing=None, chain_id=None, seq=0, reason=reason
-    )
+    return NextReplica(mode="full", since=None, backing=None, chain_id=None, seq=0, reason=reason)
 
 
 def next_replica(
@@ -59,7 +58,11 @@ def next_replica(
     retention: int,
     host_checkpoints: list[str],
     last_file_present: bool,
+    last_attempt_failed_incremental: bool = False,
 ) -> NextReplica:
+    """last_attempt_failed_incremental: the VM's newest replica attempt was an incremental that failed. libvirt can
+    list a checkpoint whose qcow2 bitmap was never persisted (qemu killed), and then every incremental from it fails
+    the same way, so the next attempt starts a new chain instead of wedging."""
     if not succeeded:
         return _full("first")
     last = _by_age(succeeded)[-1]
@@ -67,6 +70,8 @@ def next_replica(
         return _full("checkpoint_missing")
     if not last_file_present:
         return _full("backing_missing")
+    if last_attempt_failed_incremental:
+        return _full("incremental_failed")
     if last.seq + 1 >= retention:
         return _full("chain_full")
     return NextReplica(
@@ -84,8 +89,7 @@ def prune_ids(succeeded: list[ReplicaInfo], retention: int) -> list[int]:
 
     Returned grouped by chain, highest seq first, so children go before parents.
     """
-    if retention < 1:
-        retention = 1
+    retention = max(retention, 1)
     newest = _by_age(succeeded)[::-1][:retention]
     keep: set[int] = {r.id for r in newest}
     for k in newest:
@@ -107,10 +111,7 @@ def rpo_status(history: list[ReplicaInfo], interval_s: int, now: datetime) -> Rp
     lag = (now - newest.snapshot_time).total_seconds()
     achieved: float | None = None
     if len(ordered) >= 2:
-        achieved = max(
-            (b.finished_at - a.snapshot_time).total_seconds()
-            for a, b in zip(ordered, ordered[1:])
-        )
+        achieved = max((b.finished_at - a.snapshot_time).total_seconds() for a, b in itertools.pairwise(ordered))
     return RpoStatus(
         last_snapshot_at=newest.snapshot_time,
         lag_s=lag,

@@ -1,7 +1,7 @@
 import time
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from minihci.dr.chain import ReplicaInfo, next_replica, prune_ids
 from minihci.driver.base import CheckpointNotFound, DomainNotFound, DriverError, HostDriver, HostUnreachable
@@ -107,9 +107,17 @@ def plan(ctx: StepContext) -> None:
         infos = [_info(r) for r in succeeded]
         last = max(succeeded, key=lambda r: (r.snapshot_time, r.id)) if succeeded else None
         last_path = last.dr_path if last else None
+        # the newest finished attempt (this task's own row does not exist yet)
+        newest = s.scalars(
+            select(Replica)
+            .where(Replica.vm_id == vm.id, Replica.status.in_(("succeeded", "failed", "pruned")))
+            .order_by(Replica.id.desc())
+            .limit(1)
+        ).first()
+        failed_incremental = newest is not None and newest.status == "failed" and newest.mode == "incremental"
     checkpoints = ctx.driver.list_checkpoints(uri, name)
     present = ctx.driver.disk_exists(last_path) if last_path else False
-    nxt = next_replica(infos, retention, checkpoints, present)
+    nxt = next_replica(infos, retention, checkpoints, present, failed_incremental)
     with ctx.session_factory() as s, s.begin():
         if s.scalars(select(Replica.id).where(Replica.task_id == ctx.task_id)).first() is not None:
             return
@@ -189,7 +197,9 @@ def record(ctx: StepContext) -> None:
     with ctx.session_factory() as s, s.begin():
         r = s.get(Replica, row.id)
         r.size_bytes = size
-        r.finished_at = func.now()
+        # the worker clock, like snapshot_time in `backup`: achieved_rpo_s subtracts the two, so DB/worker skew
+        # must not leak into it
+        r.finished_at = datetime.now(UTC)
         r.status = "succeeded"
         mode, duration = r.mode, r.duration_ms
     ctx.log.info(
@@ -258,7 +268,7 @@ def sweep_dead_rows(ctx: StepContext) -> None:
                 row = s.get(Replica, rid)
                 if row.status == "running":
                     row.status = "failed"
-                    row.finished_at = func.now()
+                    row.finished_at = datetime.now(UTC)
             ctx.log.info(
                 "replica_swept",
                 extra={"fields": {"event": "replica_swept", "vm_id": ctx.target_id, "replica_id": rid}},
@@ -298,7 +308,7 @@ def mark_failed(ctx: StepContext) -> None:
         row = s.scalars(select(Replica).where(Replica.task_id == ctx.task_id)).one_or_none()
         if row is not None and row.status == "running":
             row.status = "failed"
-            row.finished_at = func.now()
+            row.finished_at = datetime.now(UTC)
 
 
 VM_REPLICATE = register(

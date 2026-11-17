@@ -302,6 +302,23 @@ def vms_replicas(ctx: typer.Context, vm_id: int) -> None:
     output(ctx, request(ctx, "GET", f"/vms/{vm_id}/replicas"), cols)
 
 
+@vms_app.command("failovers")
+def vms_failovers(ctx: typer.Context, vm_id: int) -> None:
+    """DR failovers of the VM, newest first; data_loss_s is a lower bound (D-037)."""
+    cols = [
+        "id",
+        "task_id",
+        "replica_id",
+        "dr_host_id",
+        "forced",
+        "primary_failed_at",
+        "running_at",
+        "data_loss_s",
+        "failover_ms",
+    ]
+    output(ctx, request(ctx, "GET", f"/vms/{vm_id}/failovers"), cols)
+
+
 @vms_app.command("failover")
 def vms_failover(
     ctx: typer.Context,

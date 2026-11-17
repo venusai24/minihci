@@ -235,6 +235,16 @@ def test_migrate_live_happy_path(two):
     assert two.boot_count(URI2, "vm1") == 1
 
 
+def test_migrate_live_drops_checkpoints(two):
+    """Probe Q4 (D-034): checkpoints do not travel with a live migration; the destination domain has none."""
+    _running(two)
+    two.create_disk_overlay("/base.qcow2", SPEC.disk_path)
+    two.create_blank_disk("/s.qcow2", like=SPEC.disk_path)
+    two.backup_domain(URI, "vm1", "/s.qcow2", "cp1", None)
+    two.migrate_live(URI, URI2, "vm1")
+    assert two.list_checkpoints(URI2, "vm1") == []
+
+
 def test_migrate_live_not_on_src(two):
     with pytest.raises(DomainNotFound):
         two.migrate_live(URI, URI2, "vm1")

@@ -439,6 +439,43 @@ def test_vms_replicas_json(monkeypatch):
     assert "SNAPSHOT_TIME" in res.stdout and "SIZE_BYTES" in res.stdout
 
 
+def test_vms_failovers_table_json_and_404(monkeypatch):
+    rows = [
+        {
+            "id": 2,
+            "vm_id": 3,
+            "task_id": 9,
+            "replica_id": 4,
+            "dr_host_id": 5,
+            "forced": False,
+            "primary_failed_at": "t",
+            "data_loss_s": 12.5,
+            "failover_ms": 840,
+            "running_at": "u",
+        }
+    ]
+    seen = []
+
+    def handler(r):
+        seen.append((r.method, r.url.path))
+        return httpx.Response(200, json=rows)
+
+    _install(monkeypatch, handler)
+    res = runner.invoke(cli.app, ["--json", "vms", "failovers", "3"])
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout) == rows
+    assert seen == [("GET", "/vms/3/failovers")]
+    res = runner.invoke(cli.app, ["vms", "failovers", "3"])
+    assert res.exit_code == 0, res.output
+    header = res.stdout.splitlines()[0]
+    for col in ("ID", "TASK_ID", "REPLICA_ID", "DR_HOST_ID", "FORCED", "DATA_LOSS_S", "FAILOVER_MS", "RUNNING_AT"):
+        assert col in header
+    assert "12.5" in res.stdout and "840" in res.stdout
+    _install(monkeypatch, lambda r: httpx.Response(404, json={"detail": "vm not found"}))
+    res = runner.invoke(cli.app, ["vms", "failovers", "99"])
+    assert res.exit_code == 1 and "vm not found" in res.output
+
+
 def test_end_to_end_against_api(monkeypatch, session_factory):
     from fastapi.testclient import TestClient
 

@@ -194,6 +194,16 @@ def test_migrate_drops_minihci_checkpoints_only(session_factory, driver, host_id
         driver.backup_domain(URI, "web1", "/s.qcow2", cp, None)
         driver.delete_disk("/s.qcow2")
         driver.create_blank_disk("/s.qcow2", like="/d/web1.qcow2")
+    seen = []
+    real = driver.migrate_live
+
+    def migrate_live(src, dst, name):
+        seen.append(driver.list_checkpoints(src, name))  # what the source holds when the migration starts
+        return real(src, dst, name)
+
+    driver.migrate_live = migrate_live
     t = migrate(session_factory, driver, vm, host_id, dst_id)
     assert t.state == "succeeded"
-    assert driver.list_checkpoints(URI_B, "web1") == ["user-ckpt"]
+    # the task dropped only its own checkpoints before migrate_live; the foreign one is left alone
+    assert seen == [["user-ckpt"]]
+    assert driver.list_checkpoints(URI_B, "web1") == []  # checkpoints do not travel (probe Q4)

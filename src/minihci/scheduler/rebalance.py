@@ -21,10 +21,15 @@ def choose_move(hosts, avg_cpu, vms, usage, config, cooling_vms, cooling_hosts) 
     """
     threshold = config.rebalance_cpu_threshold_pct
     by_id = {h.id: h for h in hosts}
+    # Sources are primary-site hosts only (D-033): moving a VM off a hot DR host would be an accidental failback
+    # (D-037). on_src below only ever holds VMs of the chosen source, so it inherits the filter.
     hot = [
         (-load, hid)
         for hid, load in avg_cpu.items()
-        if hid in by_id and load > threshold and by_id[hid].status == "ready"
+        if hid in by_id
+        and load > threshold
+        and by_id[hid].status == "ready"
+        and getattr(by_id[hid], "site", "primary") == "primary"
     ]
     if not hot:
         return None

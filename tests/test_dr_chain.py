@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from minihci.dr.chain import (
     RPO_SLACK_S,
@@ -8,12 +8,15 @@ from minihci.dr.chain import (
     rpo_status,
 )
 
-T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def rep(id, chain, seq, t, fin=5, cp=None):
     return ReplicaInfo(
-        id=id, chain_id=chain, seq=seq, dr_path=f"/dr/{id}.qcow2",
+        id=id,
+        chain_id=chain,
+        seq=seq,
+        dr_path=f"/dr/{id}.qcow2",
         checkpoint=cp or f"cp{id}",
         snapshot_time=T0 + timedelta(seconds=t),
         finished_at=T0 + timedelta(seconds=t + fin),
@@ -26,16 +29,14 @@ def chain(chain_id, seqs, start_id, start_t):
 
 def test_first_is_full():
     n = next_replica([], 3, [], False)
-    assert (n.mode, n.reason, n.seq, n.chain_id, n.since, n.backing) == (
-        "full", "first", 0, None, None, None)
+    assert (n.mode, n.reason, n.seq, n.chain_id, n.since, n.backing) == ("full", "first", 0, None, None, None)
 
 
 def test_incremental_follows_last():
     r = [rep(1, 1, 0, 0), rep(2, 1, 1, 60)]
     n = next_replica(r, 4, ["cp1", "cp2"], True)
     assert n.mode == "incremental"
-    assert (n.since, n.backing, n.chain_id, n.seq, n.reason) == (
-        "cp2", "/dr/2.qcow2", 1, 2, None)
+    assert (n.since, n.backing, n.chain_id, n.seq, n.reason) == ("cp2", "/dr/2.qcow2", 1, 2, None)
 
 
 def test_chain_full_starts_new_chain():
@@ -128,3 +129,18 @@ def test_rpo_no_replicas():
     assert (s.last_snapshot_at, s.lag_s, s.achieved_rpo_s) == (None, None, None)
     assert s.target_s == 90
     assert s.within_target is False
+
+
+def test_failed_incremental_is_full():
+    """F1: a checkpoint listed by libvirt whose qcow2 bitmap was lost makes every incremental from it fail."""
+    r = [rep(1, 1, 0, 0), rep(2, 1, 1, 60)]
+    n = next_replica(r, 4, ["cp1", "cp2"], True, last_attempt_failed_incremental=True)
+    assert (n.mode, n.reason, n.seq, n.chain_id, n.since, n.backing) == (
+        "full",
+        "incremental_failed",
+        0,
+        None,
+        None,
+        None,
+    )
+    assert next_replica(r, 4, ["cp1", "cp2"], True, last_attempt_failed_incremental=False).mode == "incremental"

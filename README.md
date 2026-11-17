@@ -194,7 +194,12 @@ minihci vms protection 1
 minihci vms replicas 1
 minihci replication
 minihci vms failover 1 --wait          # needs the VM's host to be dead; --force overrides (D-037)
+minihci vms failovers 1                # data_loss_s (a lower bound) and failover_ms per failover
 ```
+
+`GET /vms/{id}/failovers` (newest first) returns each failover's replica, DR host, `forced`,
+`primary_failed_at`, `running_at`, `failover_ms` and `data_loss_s`. A failover of a VM the user
+stopped is refused (409): start it first, or recover it with `host.reclaim`.
 
 Owner scripts (they refuse to run without `MINIHCI_REAL_HOSTS`; read them first):
 `scripts/bench_dr.py` (sync size and time per round, `--api --vm --rounds --write-mib`) and
@@ -211,7 +216,27 @@ destroying hosts, it always ends, on success and on every failure path, by print
 - Writes after the last replica are lost by design.
 - A partitioned but alive primary can keep running its copy beside the DR copy.
 - Stopped VMs are not replicated; they keep their last replica and the lag grows.
-- Retention keeps at most `2*retention - 1` files per VM; deleting a VM leaves its replicas.
+- Retention keeps at most `2*retention - 1` files per VM. Replica files and chains of a deleted VM stay
+  on the DR share (D-035); there is no purge command yet.
+- The DR host reserves domain names equal to protected VM names: a failover replaces a shut-off domain of
+  that name there and refuses an active one.
+- The next replica after a live migration or an HA restart is a full copy (reason `checkpoint_missing`):
+  checkpoints do not travel with the domain. After a failed incremental the next replica is also a full
+  copy (reason `incremental_failed`), so a checkpoint whose bitmap was lost cannot wedge the chain.
+- An open `vm.replicate` blocks failover and HA for that VM until it ends or `backup_timeout_s`
+  (1800 s by default) expires. At most `worker_threads - 1` (at least 1) replicate tasks are open at once,
+  so one worker thread stays free for HA and failover.
+- Stopping the worker (SIGTERM) waits for a running backup, up to `backup_timeout_s`. A SIGKILL is
+  crash-safe: recovery and the next replicate clean up the attempt.
+- The RPO slack is a fixed 30 s and ignores backup duration, so a full backup that takes longer than
+  about 25 s can report `within_target=false` on a healthy system.
+- `data_loss_s` is a lower bound: it is measured from the old host's last heartbeat, which precedes the
+  real failure (clamped at 0). `acceptance_m5.py` also reports `data_lost_s` from mixed clocks (laptop
+  time of the host destroy vs the guest clock of the last marker).
+- HA of a VM whose DR host dies after a failover is not handled.
+- A forced failover of a live primary destroys its domain and then undefines it best-effort (its disk
+  stays as the pre-failover copy); if the undefine cannot run, `host.reclaim` removes the domain.
+- `scripts/guestlib.py` uses `virsh console --force`, which evicts other console sessions on that domain.
 
 ## Benchmarks
 
@@ -254,7 +279,8 @@ probably NFS client lock retry, but that is not verified.
 | Full copy size | 50532352 bytes | `probe_dr.py Q3, CirrOS idle 60 s, n=1, preliminary` | preliminary |
 | Incremental size after 60 s idle | 724992 bytes | `probe_dr.py Q3, CirrOS idle 60 s, n=1, preliminary` | preliminary |
 | Sync time (full / incremental) | TBD | `bench_dr.py` (not run) | TBD |
-| Achieved RPO | TBD | `acceptance_m5.py` (not run) | TBD |
+| Achieved RPO | TBD | `acceptance_m5.py` (not run; `within_target` ignores backup duration, see M5 limitations) | TBD |
+| Data loss, API `data_loss_s` (lower bound, control-plane clock) | TBD | `acceptance_m5.py` (not run) | TBD |
 | Failover time | TBD | `acceptance_m5.py` (not run) | TBD |
 
 ### Scripted benchmarks

@@ -41,6 +41,9 @@ class FakeDriver:
         self.delays: dict[str, float] = dict(delays or {})
         self.delays_after: dict[str, float] = dict(delays_after or {})
         self.fail: dict[str, int] = dict(fail or {})
+        # incremental backups (since != None) to fail before touching anything: models a checkpoint libvirt still
+        # lists whose qcow2 bitmap was not persisted (qemu killed), so an incremental from it fails every time
+        self.fail_next_incremental = 0
         self._lock = threading.Lock()
         self._state: dict[str, Any] = {"hosts": {}, "disks": {}}
 
@@ -288,7 +291,9 @@ class FakeDriver:
                 raise DriverError(f"domain not running: {name}")
             if name in dst["domains"]:
                 raise DriverError(f"domain exists on destination: {name}")
-            dst["domains"][name] = src["domains"].pop(name)
+            moved = src["domains"].pop(name)
+            moved.pop("checkpoints", None)  # probe Q4 (D-034): checkpoints do not travel with a live migration
+            dst["domains"][name] = moved
             return MigrationResult(duration_ms=int((time.monotonic() - t0) * 1000), downtime_ms=FAKE_DOWNTIME_MS)
 
         return self._call("migrate_live", fn)
@@ -383,6 +388,9 @@ class FakeDriver:
 
     def backup_domain(self, uri: str, name: str, target_path: str, checkpoint: str, since: str | None) -> BackupResult:
         t0 = time.monotonic()
+        if since is not None and self.fail_next_incremental > 0:
+            self.fail_next_incremental -= 1
+            raise DriverError(f"injected failure: incremental backup since {since} (bitmap missing)")
 
         def fn(state: dict[str, Any]) -> BackupResult:
             d = self._domain(state, uri, name)
