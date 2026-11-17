@@ -153,3 +153,27 @@ def test_rollback_never_touches_absent_row(session_factory, driver, host_id):
     driver.undefine_domain(URI, "web1")
     run(session_factory, driver, "start", vm)
     assert actual(session_factory, vm) == "absent"
+
+
+def test_stop_destroys_a_paused_vm_and_clears_the_reason(session_factory, driver, host_id):
+    vm = make_vm(session_factory, driver, host_id)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "ioerror")
+    with session_factory() as s, s.begin():
+        row = s.get(Vm, vm)
+        row.actual_state, row.state_reason = "paused", "ioerror"
+    t = run(session_factory, driver, "stop", vm)
+    assert t.state == "succeeded"
+    assert driver.domain_state(URI, "web1") == DomainState.SHUT_OFF
+    with session_factory() as s:
+        row = s.get(Vm, vm)
+        assert (row.actual_state, row.state_reason) == ("stopped", None)
+
+
+def test_start_on_a_paused_vm_fails_and_records_paused_not_running(session_factory, driver, host_id):
+    vm = make_vm(session_factory, driver, host_id)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "user")
+    t = run(session_factory, driver, "start", vm)
+    assert t.state != "succeeded"
+    with session_factory() as s:
+        row = s.get(Vm, vm)
+        assert (row.actual_state, row.state_reason) == ("paused", "user")

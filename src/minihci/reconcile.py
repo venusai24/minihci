@@ -8,15 +8,14 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from minihci.config import Settings
-from minihci.driver.base import DomainState, DriverError, HostDriver, HostUnreachable
+from minihci.driver.base import DriverError, HostDriver, HostUnreachable
 from minihci.logging import task_context
 from minihci.models import Host, Task, Vm
 from minihci.tasks.engine import enqueue
 from minihci.tasks.locks import LOCK_NAMESPACE
+from minihci.vmstate import DB_STATE, WEDGED, apply_status, keeps_reason, observed_state
 
 log = logging.getLogger("minihci.reconcile")
-
-_DB_STATE = {DomainState.RUNNING: "running", DomainState.SHUT_OFF: "stopped"}
 
 
 @dataclass
@@ -26,6 +25,7 @@ class ReconcileReport:
     unknown: list[tuple[int, str]] = field(default_factory=list)  # (host_id, domain name)
     skipped: list[int] = field(default_factory=list)
     corrective: list[int] = field(default_factory=list)  # task ids (Q04.3)
+    unhealthy: list[int] = field(default_factory=list)  # VMs paused by a disk I/O error (D-026 amendment 4)
 
 
 def reconcile_once(session_factory: sessionmaker[Session], driver: HostDriver, settings: Settings) -> ReconcileReport:
@@ -94,52 +94,66 @@ def _reconcile_vm(session_factory, driver, host_id: int, uri: str, vm_id: int, r
         if busy is not None:
             report.skipped.append(vm_id)
             return
-        state = driver.domain_state(uri, vm.name)  # fresh read, under the lock
-        if state is not None and state not in _DB_STATE:
+        status = driver.domain_status(uri, vm.name)  # fresh read, under the lock
+        if status is not None and status.state not in DB_STATE:
             log.warning(
                 "unknown domain state",
                 extra={
-                    "fields": {"event": "unknown_domain_state", "host_id": host_id, "vm_id": vm_id, "state": str(state)}
+                    "fields": {
+                        "event": "unknown_domain_state",
+                        "host_id": host_id,
+                        "vm_id": vm_id,
+                        "state": str(status.state),
+                    }
                 },
             )
             report.skipped.append(vm_id)
             return
-        observed = _DB_STATE[state] if state is not None else "missing"
-        if observed != vm.actual_state:
-            _record_drift(vm, state, observed, host_id, vm_id, report)
-        if state is not None and observed != vm.desired_state:
-            # D-019: never act directly; enqueue in this txn, under the VM lock, so passes cannot duplicate it
-            ttype, params = ("vm.start", {}) if vm.desired_state == "running" else ("vm.stop", {"force": False})
-            task = enqueue(s, ttype, vm_id, params)
-            report.corrective.append(task.id)
-            with task_context(task.id):
-                log.warning(
-                    "corrective task enqueued",
-                    extra={
-                        "fields": {
-                            "event": "corrective_task",
-                            "task_id": task.id,
-                            "task_type": ttype,
-                            "host_id": host_id,
-                            "vm_id": vm_id,
-                            "desired": vm.desired_state,
-                            "observed": observed,
-                        }
-                    },
-                )
+        observed = observed_state(status)
+        reason = status.reason if status is not None and keeps_reason(observed) else None
+        if observed != vm.actual_state or reason != vm.state_reason:
+            _record_drift(vm, status, observed, host_id, vm_id, report)
+        if status is not None and status.unhealthy:
+            report.unhealthy.append(vm_id)
+        if status is None or observed == vm.desired_state:
+            return
+        if observed in WEDGED and vm.desired_state == "running":
+            return  # start cannot revive a paused or crashed domain; an operator has to look (see vm_unhealthy)
+        # D-019: never act directly; enqueue in this txn, under the VM lock, so passes cannot duplicate it
+        ttype, params = ("vm.start", {}) if vm.desired_state == "running" else ("vm.stop", {"force": False})
+        task = enqueue(s, ttype, vm_id, params)
+        report.corrective.append(task.id)
+        with task_context(task.id):
+            log.warning(
+                "corrective task enqueued",
+                extra={
+                    "fields": {
+                        "event": "corrective_task",
+                        "task_id": task.id,
+                        "task_type": ttype,
+                        "host_id": host_id,
+                        "vm_id": vm_id,
+                        "desired": vm.desired_state,
+                        "observed": observed,
+                    }
+                },
+            )
 
 
-def _record_drift(vm, state, observed: str, host_id: int, vm_id: int, report: ReconcileReport) -> None:
+def _record_drift(vm, status, observed: str, host_id: int, vm_id: int, report: ReconcileReport) -> None:
     fields = {"host_id": host_id, "vm_id": vm_id, "expected": vm.actual_state, "observed": observed}
-    if state is None:
+    if status is None:
         fields["observed"] = None
         fields["expected"] = vm.desired_state if vm.actual_state == "pending" else vm.actual_state
         log.warning("vm missing", extra={"fields": {"event": "vm_missing", **fields}})
-        vm.actual_state = "missing"
+        vm.actual_state, vm.state_reason = "missing", None
         report.missing.append(vm_id)
     else:
+        fields["reason"] = status.reason
         log.warning("actual state drift", extra={"fields": {"event": "actual_drift", **fields}})
-        vm.actual_state = observed
+        if status.unhealthy:
+            log.error("vm paused by a disk I/O error", extra={"fields": {"event": "vm_unhealthy", **fields}})
+        apply_status(vm, status)
         report.actual_drift.append(vm_id)
 
 

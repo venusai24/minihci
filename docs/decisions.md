@@ -409,6 +409,7 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   sees its open migrate task and exits before it asks for (2).
 
 ## D-026 Libvirt driver: optional extra, disk host, first `host_stats` sample, state mapping
+- **Status:** accepted by the owner on 2026-11-17 with amendments to points (2) and (4); see the last bullet. All other points accepted as written.
 - **Context:** Q10 implements HostDriver with libvirt-python while the hosts stay off. The PRD does not say
   whether libvirt-python is a hard dependency, which host serves the URI-less disk methods
   (`disk_exists`, `create_disk_overlay`, `delete_disk`), what the first `host_stats` call returns, how
@@ -436,6 +437,35 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
 - **How to undo:** Move libvirt-python into the main dependencies. Pass a URI to the disk methods (a
   Protocol change). Return `None` on the first sample after making the column nullable.
 - **Amendment (Q10.7 ruling):** (8) A pre-existing `minihci-images`/`minihci-vms` pool whose `target/path` (normalized) differs from `image_root`/`storage_root` raises `DriverError` naming both paths; the driver never redefines or moves a pool. Settings defaults stay as they are (FakeDriver and tests use them); a libvirt deployment must set `MINIHCI_IMAGE_ROOT=/var/lib/minihci/images` and `MINIHCI_STORAGE_ROOT=/var/lib/minihci/vms` to match the hosts' pools. Undo: redefine mismatched pools instead of raising.
+- **Amendment (owner, 2026-11-17), supersedes (2) and (4):**
+  (2) `libvirt_storage_uris` is ordered, and the first entry is `qemu:///system` on the NFS server machine
+  (the control-plane machine that exports the share), which is the default. A deployment appends the
+  `qemu+ssh://` URIs of its hosts as fallbacks. Every disk operation tries the URIs in order and moves to the
+  next one after any storage error (unreachable host, pool problem, libvirt error) or a timeout, not only a
+  failed ping. Each attempt, connect plus call, is limited by `libvirt_storage_timeout_s` (default 30 s); the
+  attempt runs in a daemon thread, a timed-out connection is dropped, and the timeout counts as
+  `HostUnreachable`. One exception: a precondition failure (disk already exists, base image missing, disk to
+  delete missing) is not retried on another host, because the share is common to all hosts and the answer
+  would be the same. If every host fails, the first non-unreachable error is raised, else `HostUnreachable`.
+  A pool whose path differs from `image_root`/`storage_root` (point 8) is a storage error on that host, so
+  the next host is tried; the pool is still never redefined. An empty list raises `HostUnreachable`.
+  (4) `DomainState` gains `PAUSED` and `CRASHED`, and the new `HostDriver.domain_status(uri, name)` returns
+  `DomainStatus(state, reason)` with libvirt's reason (paused: user, migration, ioerror, watchdog, ...;
+  crashed: panicked; shut off: shutdown, destroyed, crashed, ...). Mapping: running, blocked, shutting down,
+  pmsuspended = RUNNING; paused = PAUSED; crashed = CRASHED (chosen over SHUT_OFF-with-reason, because a
+  crashed domain is still active and must be destroyed before it can be undefined); shutoff and nostate =
+  SHUT_OFF. `vms.actual_state` accepts `paused` and `crashed`, and the new column `vms.state_reason` keeps
+  the reason while the VM is paused or crashed (migration 0011). A paused VM with reason `ioerror` is
+  unhealthy: the reconciler logs `vm_unhealthy` at ERROR once when it first sees it, lists it in
+  `ReconcileReport.unhealthy`, the API shows `unhealthy: true` and `state_reason`, and
+  `minihci_vms_unhealthy` counts it. Consequences for the rest of the system: the reconciler never enqueues
+  `vm.start` for a paused or crashed VM (start cannot revive it), but it does enqueue `vm.stop` when the VM
+  should be stopped; `vm.stop` destroys a non-running active domain instead of asking it to shut down;
+  `vm.delete`, the create/HA undo steps, `host.reclaim` and the HA fence treat any active state (running,
+  paused, crashed) as "must be destroyed first" and as "a second copy could exist". Not done: nothing
+  resumes or restarts a paused/crashed VM automatically, and HA does not restart paused or crashed VMs from a
+  dead host (`RESTARTABLE` is unchanged). Undo: map paused to RUNNING and crashed to SHUT_OFF in
+  `map_domain_state`, and drop the migration.
 
 ## D-027 Heartbeats: timings, `ready` is "up", dead measured from the last good heartbeat
 - **Context:** FR-4.1 wants `up -> suspect -> dead` from missed heartbeats. The PRD gives no exact numbers, and the existing host status for a healthy host is `ready`. The Q10 probes measured: a long-off host fails a connect in ~3 s, a just-died host hangs, an open connection's keepalive breaks in ~6 s.

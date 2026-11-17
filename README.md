@@ -67,6 +67,14 @@ uv sync --extra libvirt
 export MINIHCI_DRIVER=libvirt
 ```
 
+Disk operations (create, check, delete an overlay) try `MINIHCI_LIBVIRT_STORAGE_URIS` in order and fall
+back to the next URI after any storage error or timeout (`MINIHCI_LIBVIRT_STORAGE_TIMEOUT_S`, default 30).
+The default is `["qemu:///system"]`, the NFS server machine itself; add the hosts as fallbacks (D-026):
+
+```
+export MINIHCI_LIBVIRT_STORAGE_URIS='["qemu:///system","qemu+ssh://root@host1/system","qemu+ssh://root@host2/system"]'
+```
+
 ### Set the NFS lease to 15 seconds
 
 On the NFS server, set `lease-time=15` and `grace-time=15` (for example in

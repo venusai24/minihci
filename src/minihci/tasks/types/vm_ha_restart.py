@@ -47,8 +47,11 @@ def _assert_fenced(ctx: StepContext, vm_name: str) -> None:
     if reclaiming is not None:
         raise RuntimeError(f"host {name} has an open host.reclaim; refusing to start a second copy of vm {vm_name}")
     try:
-        if ctx.driver.domain_state(uri, vm_name) == DomainState.RUNNING:
-            raise RuntimeError(f"vm {vm_name} is still running on host {name}; refusing to start a second copy")
+        old_state = ctx.driver.domain_state(uri, vm_name)
+        if old_state is not None and old_state.active:  # running, paused or crashed: it could still run again
+            raise RuntimeError(
+                f"vm {vm_name} is still {old_state.value} on host {name}; refusing to start a second copy"
+            )
     except HostUnreachable:
         pass
 
@@ -114,7 +117,7 @@ def undo_define_domain(ctx: StepContext) -> None:
         return
     vm, uri = found
     state = ctx.driver.domain_state(uri, vm.name)
-    if state == DomainState.RUNNING:
+    if state is not None and state.active:
         ctx.driver.destroy_domain(uri, vm.name)
     if state is not None:
         ctx.driver.undefine_domain(uri, vm.name)
@@ -135,7 +138,8 @@ def undo_start_domain(ctx: StepContext) -> None:
     if found is None:
         return
     vm, uri = found
-    if ctx.driver.domain_state(uri, vm.name) == DomainState.RUNNING:
+    state = ctx.driver.domain_state(uri, vm.name)
+    if state is not None and state.active:
         ctx.driver.destroy_domain(uri, vm.name)
 
 

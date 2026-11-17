@@ -265,3 +265,34 @@ def test_metrics_ha_restart_and_pending_restart(session_factory):
         (("vm", "a"),): 12.5,
         (("vm", "d"),): 30.0,
     }
+
+
+def test_metrics_vms_unhealthy_counts_paused_ioerror_only(session_factory):
+    from minihci.models import Host, Vm
+
+    with session_factory() as s:
+        h = Host(name="h1", libvirt_uri="u://1", status="ready")
+        s.add(h)
+        s.flush()
+        for n, st, why in (
+            ("a", "paused", "ioerror"),
+            ("b", "paused", "user"),
+            ("c", "crashed", "panicked"),
+            ("d", "running", None),
+            ("e", "paused", "ioerror"),
+        ):
+            s.add(
+                Vm(
+                    name=n,
+                    host_id=h.id,
+                    vcpus=1,
+                    mem_mb=1,
+                    image="i",
+                    disk_path=f"/{n}",
+                    actual_state=st,
+                    state_reason=why,
+                )
+            )
+        s.commit()
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    assert _samples(client.get("/metrics").text, "minihci_vms_unhealthy") == {(): 2}

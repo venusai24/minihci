@@ -340,3 +340,17 @@ def test_list_vm_migrations_empty(client, session_factory, driver, host_id):
     vm = make_vm(session_factory, driver, host_id)
     r = client.get(f"/vms/{vm}/migrations")
     assert r.status_code == 200 and r.json() == []
+
+
+def test_vm_out_has_state_reason_and_unhealthy(client, session_factory, driver, host_id):
+    vm = make_vm(session_factory, driver, host_id)
+    body = client.get(f"/vms/{vm}").json()
+    assert body["state_reason"] is None and body["unhealthy"] is False
+    with session_factory() as s, s.begin():
+        row = s.get(Vm, vm)
+        row.actual_state, row.state_reason = "paused", "ioerror"
+    body = client.get(f"/vms/{vm}").json()
+    assert (body["actual_state"], body["state_reason"], body["unhealthy"]) == ("paused", "ioerror", True)
+    with session_factory() as s, s.begin():
+        s.get(Vm, vm).state_reason = "user"
+    assert client.get(f"/vms/{vm}").json()["unhealthy"] is False

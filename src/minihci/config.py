@@ -12,7 +12,10 @@ class Settings(BaseSettings):
     api_token: str | None = None  # set it to require "Authorization: Bearer <token>" on every API route
     storage_root: str = "/srv/minihci/images"
     image_root: str = "/srv/minihci/base"
-    libvirt_storage_uris: list[str] = []  # D-026: hosts tried in order for disk operations
+    # D-026: hosts tried in order for disk operations. qemu:///system is the NFS server machine itself;
+    # a deployment appends the qemu+ssh:// URIs of its hosts as fallbacks.
+    libvirt_storage_uris: list[str] = ["qemu:///system"]
+    libvirt_storage_timeout_s: float = 30  # per host, connect plus call
     fake_state_file: Path | None = None
     fake_delays: dict[str, float] = {}  # driver method -> seconds, slept BEFORE the effect
     fake_delays_after: dict[str, float] = {}  # slept AFTER the effect

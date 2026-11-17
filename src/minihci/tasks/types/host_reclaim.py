@@ -1,6 +1,5 @@
 from sqlalchemy import select, text
 
-from minihci.driver.base import DomainState
 from minihci.models import Host, Vm
 from minihci.tasks.executor import Step, StepContext, TaskType
 from minihci.tasks.locks import LOCK_NAMESPACE
@@ -31,7 +30,7 @@ def remove_stale(ctx: StepContext) -> None:
             state = ctx.driver.domain_state(uri, name)
             if state is None:
                 continue
-            if state == DomainState.RUNNING:
+            if state.active:
                 ctx.driver.destroy_domain(uri, name)
             ctx.driver.undefine_domain(uri, name)
             removed = state

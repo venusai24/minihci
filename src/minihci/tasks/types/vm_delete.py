@@ -1,4 +1,3 @@
-from minihci.driver.base import DomainState
 from minihci.models import Vm
 from minihci.tasks.executor import Step, StepContext, TaskType
 from minihci.tasks.registry import register
@@ -10,7 +9,8 @@ from minihci.tasks.types.vm_power import _load, sync_actual_state
 
 def destroy_domain(ctx: StepContext) -> None:
     name, uri = _load(ctx)
-    if ctx.driver.domain_state(uri, name) == DomainState.RUNNING:
+    state = ctx.driver.domain_state(uri, name)
+    if state is not None and state.active:  # also a paused or crashed domain: it must go before undefine
         ctx.driver.destroy_domain(uri, name)
 
 

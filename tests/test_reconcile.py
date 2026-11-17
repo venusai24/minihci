@@ -182,12 +182,12 @@ def test_host_unreachable_exception_type(session_factory, host_id):
     assert run(session_factory, d).missing == []
 
 
-def test_domain_state_host_unreachable_skips_rest_of_host(session_factory, logbuf):
+def test_domain_status_host_unreachable_skips_rest_of_host(session_factory, logbuf):
     class Flaky(FakeDriver):
-        def domain_state(self, uri, name):
+        def domain_status(self, uri, name):
             if uri == URI:
                 raise HostUnreachable("down")
-            return super().domain_state(uri, name)
+            return super().domain_status(uri, name)
 
     d = Flaky()
     uri_b = "qemu+ssh://b/system"
@@ -207,8 +207,8 @@ def test_domain_state_host_unreachable_skips_rest_of_host(session_factory, logbu
     assert len(ev) == 1 and ev[0]["vm_id"] == a1 and ev[0]["host_id"] == ha
 
 
-def test_domain_state_driver_error_skips_only_that_vm(session_factory, host_id, logbuf):
-    d = FakeDriver(fail={"domain_state": 1})
+def test_domain_status_driver_error_skips_only_that_vm(session_factory, host_id, logbuf):
+    d = FakeDriver(fail={"domain_status": 1})
     d.add_host(URI, 8, 16384)
     v1 = create_vm(session_factory, d, host_id, name="v1")
     v2 = create_vm(session_factory, d, host_id, name="v2")
@@ -310,11 +310,13 @@ def test_reconcile_never_calls_mutating_driver_methods(session_factory, driver, 
 
 
 def test_unknown_domain_state_logged_and_skipped(session_factory, host_id, logbuf):
-    class Paused(FakeDriver):
-        def domain_state(self, uri, name):
-            return "paused" if name == "v1" else super().domain_state(uri, name)
+    from minihci.driver.base import DomainStatus
 
-    d = Paused()
+    class Weird(FakeDriver):
+        def domain_status(self, uri, name):
+            return DomainStatus("weird", None) if name == "v1" else super().domain_status(uri, name)
+
+    d = Weird()
     d.add_host(URI, 8, 16384)
     v1 = create_vm(session_factory, d, host_id, name="v1")
     v2 = create_vm(session_factory, d, host_id, name="v2")
@@ -324,4 +326,83 @@ def test_unknown_domain_state_logged_and_skipped(session_factory, host_id, logbu
     assert report.actual_drift == [v2]
     assert len(report.corrective) == 1  # only v2; nothing for the unknown-state VM
     ev = [e for e in events(logbuf) if e["event"] == "unknown_domain_state"]
-    assert len(ev) == 1 and ev[0]["vm_id"] == v1 and ev[0]["state"] == "paused"
+    assert len(ev) == 1 and ev[0]["vm_id"] == v1 and ev[0]["state"] == "weird"
+
+
+# ---- D-026 amendment 4: paused and crashed ----
+
+
+def reason_of(session_factory, vm_id):
+    with session_factory() as s:
+        return s.get(Vm, vm_id).state_reason
+
+
+def test_paused_ioerror_is_recorded_unhealthy_and_gets_no_start(session_factory, driver, host_id, logbuf):
+    from minihci.driver.base import DomainState
+
+    vm_id = create_vm(session_factory, driver, host_id)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "ioerror")
+    report = run(session_factory, driver)
+    assert actual(session_factory, vm_id) == "paused" and reason_of(session_factory, vm_id) == "ioerror"
+    assert report.actual_drift == [vm_id] and report.unhealthy == [vm_id]
+    assert report.corrective == [] and tasks_of(session_factory) == []  # start cannot fix a paused domain
+    errors = [e for e in events(logbuf) if e["event"] == "vm_unhealthy"]
+    assert len(errors) == 1 and errors[0]["level"] == "ERROR" and errors[0]["reason"] == "ioerror"
+    again = run(session_factory, driver)  # still unhealthy, but no new drift and no repeated error log
+    assert again.unhealthy == [vm_id] and again.actual_drift == []
+    assert len([e for e in events(logbuf) if e["event"] == "vm_unhealthy"]) == 1
+
+
+def test_paused_by_user_is_recorded_but_not_unhealthy(session_factory, driver, host_id):
+    from minihci.driver.base import DomainState
+
+    vm_id = create_vm(session_factory, driver, host_id)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "user")
+    report = run(session_factory, driver)
+    assert actual(session_factory, vm_id) == "paused" and reason_of(session_factory, vm_id) == "user"
+    assert report.unhealthy == [] and report.corrective == []
+
+
+def test_reason_change_while_paused_is_drift(session_factory, driver, host_id):
+    from minihci.driver.base import DomainState
+
+    vm_id = create_vm(session_factory, driver, host_id)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "user")
+    run(session_factory, driver)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "ioerror")
+    report = run(session_factory, driver)
+    assert report.actual_drift == [vm_id] and report.unhealthy == [vm_id]
+    assert reason_of(session_factory, vm_id) == "ioerror"
+
+
+def test_crashed_is_recorded_with_reason_and_not_restarted(session_factory, driver, host_id):
+    from minihci.driver.base import DomainState
+
+    vm_id = create_vm(session_factory, driver, host_id)
+    driver.set_domain_state(URI, "web1", DomainState.CRASHED, "panicked")
+    report = run(session_factory, driver)
+    assert actual(session_factory, vm_id) == "crashed" and reason_of(session_factory, vm_id) == "panicked"
+    assert report.corrective == []
+
+
+def test_reason_is_cleared_when_the_vm_recovers(session_factory, driver, host_id):
+    from minihci.driver.base import DomainState
+
+    vm_id = create_vm(session_factory, driver, host_id)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "ioerror")
+    run(session_factory, driver)
+    driver.set_domain_state(URI, "web1", DomainState.RUNNING, None)
+    run(session_factory, driver)
+    assert actual(session_factory, vm_id) == "running" and reason_of(session_factory, vm_id) is None
+
+
+def test_paused_vm_that_should_be_stopped_gets_a_stop_task_that_destroys_it(session_factory, driver, host_id):
+    from minihci.driver.base import DomainState
+
+    vm_id = create_vm(session_factory, driver, host_id, desired="stopped", running=True)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "user")
+    report = run(session_factory, driver)
+    assert len(report.corrective) == 1 and tasks_of(session_factory) == [("vm.stop", vm_id, {"force": False})]
+    drain(session_factory, driver)
+    assert driver.domain_state(URI, "web1") == DomainState.SHUT_OFF
+    assert actual(session_factory, vm_id) == "stopped" and reason_of(session_factory, vm_id) is None

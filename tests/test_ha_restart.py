@@ -104,6 +104,17 @@ def test_suspect_host_is_not_fenced(session_factory, driver, dead_id, surv_id):
     assert row.actual_state == "running" and row.host_id == dead_id
 
 
+def test_old_host_answers_paused_is_refused_too(session_factory, driver, dead_id, surv_id):
+    from minihci.driver.base import DomainState
+
+    vm = make_vm(session_factory, driver, dead_id)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "ioerror")  # a paused copy can be resumed
+    set_status(session_factory, dead_id, "dead")
+    t = restart(session_factory, driver, vm, dead_id)
+    assert t.state == "rolled_back" and "still paused" in t.error
+    assert driver.list_domains(URI_B) == {}
+
+
 def test_old_host_answers_running_is_refused(session_factory, driver, dead_id, surv_id):
     vm = make_vm(session_factory, driver, dead_id)
     set_status(session_factory, dead_id, "dead")  # control plane says dead, but the host is up

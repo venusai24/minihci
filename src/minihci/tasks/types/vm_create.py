@@ -40,7 +40,7 @@ def define_domain(ctx: StepContext) -> None:
 def undo_define_domain(ctx: StepContext) -> None:
     vm, uri = _load(ctx)
     state = ctx.driver.domain_state(uri, vm.name)
-    if state == DomainState.RUNNING:
+    if state is not None and state.active:
         ctx.driver.destroy_domain(uri, vm.name)
     if state is not None:
         ctx.driver.undefine_domain(uri, vm.name)
@@ -54,7 +54,8 @@ def start_domain(ctx: StepContext) -> None:
 
 def undo_start_domain(ctx: StepContext) -> None:
     vm, uri = _load(ctx)
-    if ctx.driver.domain_state(uri, vm.name) == DomainState.RUNNING:
+    state = ctx.driver.domain_state(uri, vm.name)
+    if state is not None and state.active:
         ctx.driver.destroy_domain(uri, vm.name)
 
 

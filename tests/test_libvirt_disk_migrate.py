@@ -151,6 +151,7 @@ def _pool(stub_libvirt, name, path):
 @pytest.mark.parametrize("name", ["minihci-vms", "minihci-images"])
 def test_preexisting_pool_with_wrong_path_rejected(drv, stub_libvirt, name):
     _pool(stub_libvirt, name, "/other/dir")
+    drv._storage_uris = [U1]  # with a fallback host the next one would be tried instead
     with pytest.raises(DriverError, match=f"pool {name} targets /other/dir, expected"):
         drv.create_disk_overlay(BASE, DISK)
     assert stub_libvirt.host(U1).pools[name].path == "/other/dir"  # never redefined
@@ -213,3 +214,83 @@ def test_migrate_dest_jobstats_failure_uses_wall_clock(drv, stub_libvirt, caplog
         res = drv.migrate_live(U1, U2, "vm1")
     assert res.downtime_ms is None and res.duration_ms == 1500
     assert "vm1" in caplog.text
+
+
+# ---- D-026 amended: storage hosts in order, fallback on any storage error, per-attempt timeout ----
+
+
+def test_wrong_pool_on_first_storage_host_falls_back_to_the_next(drv, stub_libvirt):
+    _pool(stub_libvirt, "minihci-vms", "/other/dir")
+    drv.create_disk_overlay(BASE, DISK)  # U1's pool is wrong; U2 does it
+    assert DISK in stub_libvirt.host(U2).storage
+    assert stub_libvirt.host(U1).pools["minihci-vms"].path == "/other/dir"  # never redefined
+
+
+def test_storage_error_other_than_unreachable_falls_back(drv, stub_libvirt):
+    from tests.stubs.fake_libvirt import _err
+
+    stub_libvirt.host(U1).fail["vol_create"] = _err("VIR_ERR_INTERNAL_ERROR", "no space left")
+    drv.create_disk_overlay(BASE, DISK)
+    assert drv.disk_exists(DISK)
+    assert DISK in stub_libvirt.host(U2).storage
+
+
+def test_all_storage_hosts_failing_raises_the_real_error_not_unreachable(drv, stub_libvirt):
+    from tests.stubs.fake_libvirt import _err
+
+    stub_libvirt.host(U1).fail["vol_create"] = _err("VIR_ERR_INTERNAL_ERROR", "no space left")
+    stub_libvirt.host(U2).down = True
+    with pytest.raises(DriverError, match="no space left") as ei:
+        drv.create_disk_overlay(BASE, DISK)
+    assert not isinstance(ei.value, HostUnreachable)
+
+
+def test_precondition_failure_is_not_retried_on_the_next_host(drv, stub_libvirt):
+    drv.create_disk_overlay(BASE, DISK)
+    with pytest.raises(DriverError, match="already exists"):
+        drv.create_disk_overlay(BASE, DISK)
+    with pytest.raises(DriverError, match="not found"):
+        drv.delete_disk(f"{VMS}/ghost.qcow2")
+    assert not stub_libvirt.host(U2).conns  # U2 was never contacted
+
+
+def test_hung_storage_host_times_out_and_falls_back(drv, stub_libvirt):
+    import time
+
+    drv._storage_timeout_s = 0.3
+    ev = stub_libvirt.hang(U1)
+    t0 = time.monotonic()
+    try:
+        drv.create_disk_overlay(BASE, DISK)
+        assert time.monotonic() - t0 < 2
+        assert DISK in stub_libvirt.host(U2).storage
+    finally:
+        ev.set()
+
+
+def test_every_storage_host_hung_raises_unreachable(drv, stub_libvirt):
+    drv._storage_timeout_s = 0.2
+    evs = [stub_libvirt.hang(U1), stub_libvirt.hang(U2)]
+    try:
+        with pytest.raises(HostUnreachable, match="timed out"):
+            drv.disk_exists(DISK)
+    finally:
+        for ev in evs:
+            ev.set()
+
+
+def test_no_storage_uris_configured_is_unreachable(stub_libvirt):
+    d = lv.LibvirtDriver(storage_uris=[])
+    with pytest.raises(HostUnreachable, match="no libvirt storage host"):
+        d.disk_exists(DISK)
+
+
+def test_default_storage_order_starts_with_the_local_nfs_server_and_has_a_timeout():
+    s = Settings()
+    assert s.libvirt_storage_uris[0] == "qemu:///system"
+    assert s.libvirt_storage_timeout_s == 30
+
+
+def test_build_driver_passes_timeout(stub_libvirt):
+    d = build_driver(Settings(driver="libvirt", libvirt_storage_timeout_s=4.5))
+    assert d._storage_timeout_s == 4.5 and d._storage_uris[0] == "qemu:///system"

@@ -318,3 +318,42 @@ def test_downgrade_to_0009_drops_ha_restarts_and_maps_pending_restart_to_error(e
         with engine.begin() as c:
             c.execute(text("TRUNCATE tasks, vms, hosts CASCADE"))
     assert "ha_restarts" in inspect(engine).get_table_names()
+
+
+def test_vm_paused_and_crashed_accepted_with_reason(session_factory):
+    with session_factory() as s:
+        h = make_host(s)
+        s.add(_vm(h, actual_state="paused", state_reason="ioerror"))
+        s.add(_vm(h, name="web2", path="/srv/w2.qcow2", actual_state="crashed", state_reason="panicked"))
+        s.add(_vm(h, name="web3", path="/srv/w3.qcow2"))
+        s.commit()
+        rows = {v.name: (v.actual_state, v.state_reason) for v in s.scalars(select(Vm))}
+        assert rows == {"web1": ("paused", "ioerror"), "web2": ("crashed", "panicked"), "web3": ("pending", None)}
+
+
+def test_downgrade_to_0010_maps_paused_and_crashed_to_error(engine):
+    cfg = alembic_config(TEST_DB_URL)
+    command.upgrade(cfg, "head")
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE hosts CASCADE"))
+        c.execute(
+            text("insert into hosts (name, libvirt_uri, status, cpu_total, mem_total_mb) values ('h','u','ready',8,1)")
+        )
+        for i, st in enumerate(["paused", "crashed", "running"]):
+            c.execute(
+                text(
+                    "insert into vms (name, host_id, vcpus, mem_mb, image, disk_path, actual_state, state_reason) "
+                    "select :n, id, 1, 1, 'i', :p, :s, 'x' from hosts"
+                ),
+                {"n": f"v{i}", "p": f"/d{i}", "s": st},
+            )
+    try:
+        command.downgrade(cfg, "0010")
+        assert "state_reason" not in {c["name"] for c in inspect(engine).get_columns("vms")}
+        with engine.connect() as c:
+            got = dict(c.execute(text("select name, actual_state from vms")).all())
+        assert got == {"v0": "error", "v1": "error", "v2": "running"}
+    finally:
+        command.upgrade(cfg, "head")
+        with engine.begin() as c:
+            c.execute(text("TRUNCATE hosts CASCADE"))

@@ -42,10 +42,10 @@ def test_mem_used_mb():
         (0, DomainState.SHUT_OFF),
         (1, DomainState.RUNNING),
         (2, DomainState.RUNNING),
-        (3, DomainState.RUNNING),
+        (3, DomainState.PAUSED),
         (4, DomainState.RUNNING),
         (5, DomainState.SHUT_OFF),
-        (6, DomainState.SHUT_OFF),
+        (6, DomainState.CRASHED),
         (7, DomainState.RUNNING),
     ],
 )

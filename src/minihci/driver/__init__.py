@@ -17,6 +17,7 @@ def build_driver(settings: Settings) -> HostDriver:
 
         return LibvirtDriver(
             storage_uris=settings.libvirt_storage_uris,
+            storage_timeout_s=settings.libvirt_storage_timeout_s,
             image_root=settings.image_root,
             storage_root=settings.storage_root,
         )

@@ -16,6 +16,7 @@ from minihci.scheduler.config import load_config
 from minihci.scheduler.placement import PLACEABLE_STATUSES, NoCapacity, fits, place
 from minihci.tasks.engine import enqueue
 from minihci.tasks.locks import LOCK_NAMESPACE
+from minihci.vmstate import is_unhealthy
 
 log = logging.getLogger("minihci.api")
 router = APIRouter()
@@ -108,6 +109,8 @@ def _vm_out(v: Vm) -> dict[str, Any]:
         "disk_path": v.disk_path,
         "desired_state": v.desired_state,
         "actual_state": v.actual_state,
+        "state_reason": v.state_reason,  # libvirt's reason while paused or crashed, else null
+        "unhealthy": is_unhealthy(v.actual_state, v.state_reason),
     }
 
 

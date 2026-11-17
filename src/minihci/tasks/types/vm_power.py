@@ -4,6 +4,7 @@ from minihci.driver.base import DomainState
 from minihci.models import Host, Vm
 from minihci.tasks.executor import Step, StepContext, TaskType
 from minihci.tasks.registry import register
+from minihci.vmstate import apply_status
 
 POLL_INTERVAL_S = 0.2
 
@@ -16,7 +17,8 @@ def _load(ctx: StepContext) -> tuple[str, str]:
 
 def _set_actual(ctx: StepContext, value: str) -> None:
     with ctx.session_factory() as s, s.begin():
-        s.get(Vm, ctx.target_id).actual_state = value
+        vm = s.get(Vm, ctx.target_id)
+        vm.actual_state, vm.state_reason = value, None
 
 
 def _ensure_started(ctx: StepContext) -> None:
@@ -37,14 +39,15 @@ def stop(ctx: StepContext) -> None:
     state = ctx.driver.domain_state(uri, name)
     if state is None:
         raise RuntimeError("domain not defined")
-    if state != DomainState.RUNNING:
+    if not state.active:
         return
-    if ctx.params.get("force"):
+    if ctx.params.get("force") or state != DomainState.RUNNING:
+        # a paused or crashed guest cannot act on an ACPI shutdown request
         ctx.driver.destroy_domain(uri, name)
         return
     ctx.driver.shutdown_domain(uri, name)
     deadline = time.monotonic() + ctx.settings.vm_shutdown_timeout_s
-    while ctx.driver.domain_state(uri, name) == DomainState.RUNNING:
+    while (st := ctx.driver.domain_state(uri, name)) is not None and st.active:
         if time.monotonic() >= deadline:
             raise RuntimeError("graceful shutdown timed out; retry with force")
         time.sleep(POLL_INTERVAL_S)
@@ -74,8 +77,13 @@ def sync_actual_state(ctx: StepContext) -> None:
         if vm.actual_state == "absent":
             return
         name, uri = vm.name, s.get(Host, vm.host_id).libvirt_uri
-    state = ctx.driver.domain_state(uri, name)
-    _set_actual(ctx, {DomainState.RUNNING: "running", DomainState.SHUT_OFF: "stopped", None: "error"}[state])
+    status = ctx.driver.domain_status(uri, name)
+    with ctx.session_factory() as s, s.begin():
+        vm = s.get(Vm, ctx.target_id)
+        if status is None:
+            vm.actual_state, vm.state_reason = "error", None
+        else:
+            apply_status(vm, status)
 
 
 VM_START = register(

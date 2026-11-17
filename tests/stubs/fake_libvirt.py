@@ -163,6 +163,7 @@ class FakeDomain:
         self._name = ET.fromstring(xml).findtext("name")
         self.xml = xml
         self.state_ = SHUTOFF
+        self.reason_ = 1  # the second item of virDomainGetState
         self.persistent = True
         self.defined = True
         self.job_stats: dict[str, int] | Exception = {"downtime": 90, "time_elapsed": 400}
@@ -181,11 +182,11 @@ class FakeDomain:
 
     def state(self, flags=0):
         self._check("state")
-        return [self.state_, 1]
+        return [self.state_, self.reason_]
 
     def isActive(self):
         self._check("isActive")
-        return int(self.state_ == RUNNING)
+        return int(self.state_ not in (SHUTOFF, 0))
 
     def create(self):
         self._check("create")  # real libvirt may block here until the NFS lease expires
@@ -200,7 +201,10 @@ class FakeDomain:
         self.state_ = SHUTOFF
 
     def destroy(self):
-        self._stop("destroy")
+        self._check("destroy")
+        if self.state_ in (SHUTOFF, 0):  # a paused or crashed domain is still active and can be destroyed
+            raise _err("VIR_ERR_OPERATION_INVALID", "domain is not running")
+        self.state_ = SHUTOFF
 
     def shutdown(self):
         self._stop("shutdown")

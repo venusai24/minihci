@@ -49,6 +49,18 @@ class DbCollector:
         g = GaugeMetricFamily("minihci_vms_pending_restart", "VMs waiting for capacity to be restarted")
         g.add_metric([], pending)
         yield g
+        with self._sf() as s:
+            unhealthy = (
+                s.scalar(
+                    select(func.count())
+                    .select_from(Vm)
+                    .where(Vm.actual_state == "paused", Vm.state_reason == "ioerror", Vm.desired_state != "absent")
+                )
+                or 0
+            )
+        u = GaugeMetricFamily("minihci_vms_unhealthy", "VMs paused by a disk I/O error (D-026)")
+        u.add_metric([], unhealthy)
+        yield u
         last = {vm_id: (name, ms) for vm_id, name, ms in rows}  # ordered: last restart per VM wins
         r = GaugeMetricFamily(
             "minihci_ha_restart_recovery_seconds",

@@ -15,6 +15,7 @@ from minihci.driver.base import (
     DomainNotFound,
     DomainSpec,
     DomainState,
+    DomainStatus,
     DriverError,
     HostInfo,
     HostStats,
@@ -134,7 +135,9 @@ class FakeDriver:
             load = h.get("load") or {}
             mem = load.get("mem_used_mb")
             if mem is None:
-                mem = sum(d["mem_mb"] for d in h["domains"].values() if d["state"] == DomainState.RUNNING.value)
+                mem = sum(
+                    d["mem_mb"] for d in h["domains"].values() if DomainState(d["state"]).active
+                )  # a paused guest still holds its memory
             return HostStats(cpu_pct=float(load.get("cpu_pct", 0.0)), mem_used_mb=int(mem))
 
         return self._call("host_stats", fn)
@@ -152,6 +155,22 @@ class FakeDriver:
             return DomainState(d["state"]) if d else None
 
         return self._call("domain_state", fn)
+
+    def domain_status(self, uri: str, name: str) -> DomainStatus | None:
+        def fn(state: dict[str, Any]) -> DomainStatus | None:
+            d = self._host(state, uri)["domains"].get(name)
+            return DomainStatus(DomainState(d["state"]), d.get("reason")) if d else None
+
+        return self._call("domain_status", fn)
+
+    def set_domain_state(self, uri: str, name: str, new: DomainState, reason: str | None = None) -> None:
+        """Test helper (not part of the protocol): put a domain into any state, e.g. PAUSED/ioerror."""
+
+        def fn(state: dict[str, Any]) -> None:
+            d = self._domain(state, uri, name)
+            d["state"], d["reason"] = new.value, reason
+
+        self._call("set_domain_state", fn)
 
     def define_domain(self, uri: str, spec: DomainSpec) -> None:
         def fn(state: dict[str, Any]) -> None:
@@ -176,8 +195,8 @@ class FakeDriver:
     def undefine_domain(self, uri: str, name: str) -> None:
         def fn(state: dict[str, Any]) -> None:
             d = self._domain(state, uri, name)
-            if d["state"] == DomainState.RUNNING.value:
-                raise DriverError(f"cannot undefine running domain: {name}")
+            if DomainState(d["state"]).active:
+                raise DriverError(f"cannot undefine active domain: {name}")
             del state["hosts"][uri]["domains"][name]
 
         self._call("undefine_domain", fn)
@@ -185,9 +204,9 @@ class FakeDriver:
     def start_domain(self, uri: str, name: str) -> None:
         def fn(state: dict[str, Any]) -> None:
             d = self._domain(state, uri, name)
-            if d["state"] == DomainState.RUNNING.value:
+            if DomainState(d["state"]).active:
                 raise DriverError(f"domain already running: {name}")
-            d["state"] = DomainState.RUNNING.value
+            d["state"], d["reason"] = DomainState.RUNNING.value, None
             d["boot_count"] = d.get("boot_count", 0) + 1
 
         self._call("start_domain", fn)
@@ -218,9 +237,9 @@ class FakeDriver:
     def destroy_domain(self, uri: str, name: str) -> None:
         def fn(state: dict[str, Any]) -> None:
             d = self._domain(state, uri, name)
-            if d["state"] != DomainState.RUNNING.value:
+            if not DomainState(d["state"]).active:
                 raise DriverError(f"domain not running: {name}")
-            d["state"] = DomainState.SHUT_OFF.value
+            d["state"], d["reason"] = DomainState.SHUT_OFF.value, "destroyed"
 
         self._call("destroy_domain", fn)
 

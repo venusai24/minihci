@@ -46,7 +46,8 @@ class Vm(Base):
     __table_args__ = (
         CheckConstraint("desired_state in ('running','stopped','absent')", name="ck_vms_desired_state"),
         CheckConstraint(
-            "actual_state in ('pending','running','stopped','absent','error','missing','pending_restart')",
+            "actual_state in ('pending','running','stopped','absent','error','missing','pending_restart',"
+            "'paused','crashed')",
             name="ck_vms_actual_state",
         ),
         Index("uq_vms_name_live", "name", unique=True, postgresql_where=text("desired_state <> 'absent'")),
@@ -61,6 +62,7 @@ class Vm(Base):
     disk_path: Mapped[str]
     desired_state: Mapped[str] = mapped_column(default="running", server_default="running")
     actual_state: Mapped[str] = mapped_column(default="pending", server_default="pending")
+    state_reason: Mapped[str | None] = mapped_column(default=None)  # libvirt reason for paused/crashed (D-026)
 
 
 class Task(Base):

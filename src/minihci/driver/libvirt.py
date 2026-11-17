@@ -14,12 +14,14 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from types import ModuleType
+from typing import TypeVar
 
 from minihci.driver.base import (
     DomainExists,
     DomainNotFound,
     DomainSpec,
     DomainState,
+    DomainStatus,
     DriverError,
     HostInfo,
     HostStats,
@@ -28,6 +30,7 @@ from minihci.driver.base import (
 )
 from minihci.driver.libvirt_errors import load_libvirt, map_error
 from minihci.driver.libvirt_stats import cpu_pct, map_domain_state, mem_used_mb, migration_result
+from minihci.driver.libvirt_stats import domain_status as status_from_libvirt
 from minihci.driver.libvirt_xml import dir_pool_xml, domain_xml, overlay_volume_xml
 from minihci.paths import resolve_image
 
@@ -212,11 +215,20 @@ def _quiet_close(conn: object) -> None:
         log.debug("closing libvirt connection failed", exc_info=True)
 
 
+T = TypeVar("T")
+
+
+class _Precondition(DriverError):
+    """The data, not the host, said no (disk exists, image or disk missing): another host would say the same."""
+
+
 class LibvirtDriver:
     """HostDriver host + domain operations over libvirt-python (D-026).
 
-    Disk ops run on the first reachable host of `storage_uris` (D-026); pools are refreshed before
-    every volume lookup because another host may have created or deleted the file.
+    Disk ops try the hosts of `storage_uris` in order (D-026, amended): the next host is tried after any
+    storage error or timeout on the previous one, but not after a precondition failure (disk exists,
+    base image missing), because the share is common to all hosts and the answer would be the same.
+    Pools are refreshed before every volume lookup because another host may have changed the share.
     """
 
     IMAGES_POOL = "minihci-images"
@@ -231,8 +243,10 @@ class LibvirtDriver:
         storage_uris: list[str] | None = None,
         image_root: str = "/srv/minihci/base",
         storage_root: str = "/srv/minihci/images",
+        storage_timeout_s: float = 30,
     ) -> None:
         self._storage_uris = list(storage_uris or [])
+        self._storage_timeout_s = storage_timeout_s
         self._image_root = image_root
         self._storage_root = storage_root
         self._sleep = sleep
@@ -308,9 +322,14 @@ class LibvirtDriver:
         return out
 
     def domain_state(self, uri: str, name: str) -> DomainState | None:
+        status = self.domain_status(uri, name)
+        return None if status is None else status.state
+
+    def domain_status(self, uri: str, name: str) -> DomainStatus | None:
+        """State plus libvirt's reason (paused: user, ioerror, ...), D-026 (4)."""
         try:
             with self._op(uri) as conn:
-                return map_domain_state(self._lookup(conn, name).state(0)[0])
+                return status_from_libvirt(self._lookup(conn, name).state(0))
         except DomainNotFound:
             return None
 
@@ -352,11 +371,49 @@ class LibvirtDriver:
 
     # ---- disks (D-026) ----
 
-    def _disk_uri(self) -> str:
+    def _storage(self, fn: Callable[[object], T]) -> T:
+        """Run fn(conn) on the storage hosts in order until one succeeds (D-026 amended).
+
+        Each attempt gets `storage_timeout_s` for connecting plus the call. A timeout, an unreachable
+        host or any other storage error moves on to the next host; a _Precondition does not.
+        """
+        if not self._storage_uris:
+            raise HostUnreachable("no libvirt storage host configured")
+        failures: list[DriverError] = []
         for uri in self._storage_uris:
-            if self.ping(uri):
-                return uri
-        raise HostUnreachable("no libvirt storage host answered")
+            try:
+                return self._attempt(uri, fn)
+            except _Precondition:
+                raise
+            except DriverError as e:  # includes HostUnreachable
+                failures.append(e)
+                log.warning(
+                    "storage host failed, trying the next one",
+                    extra={"fields": {"event": "storage_fallback", "uri": uri, "error": str(e)}},
+                )
+        hard = [e for e in failures if not isinstance(e, HostUnreachable)]
+        raise (hard or failures)[0]
+
+    def _attempt(self, uri: str, fn: Callable[[object], T]) -> T:
+        out: list[tuple[bool, object]] = []
+
+        def run() -> None:
+            try:
+                with self._op(uri) as conn:
+                    out.append((True, fn(conn)))
+            except BaseException as e:  # noqa: BLE001 - re-raised in the caller
+                out.append((False, e))
+
+        t = threading.Thread(target=run, name=f"libvirt-storage-{uri}", daemon=True)
+        t.start()
+        t.join(self._storage_timeout_s)
+        if not out:  # still running: drop the connection so the next attempt starts clean
+            self._conns.drop(uri)
+            raise HostUnreachable(f"storage call on {uri} timed out after {self._storage_timeout_s}s")
+        ok, value = out[0]
+        if not ok:
+            raise value  # type: ignore[misc]
+        return value  # type: ignore[return-value]
 
     def _check_disk_path(self, path: str) -> None:
         if os.path.normpath(os.path.dirname(path)) != os.path.normpath(self._storage_root):
@@ -399,9 +456,11 @@ class LibvirtDriver:
         return pools, lookup
 
     def disk_exists(self, path: str) -> bool:
-        with self._op(self._disk_uri()) as conn:
+        def run(conn) -> bool:
             _, lookup = self._find_volume(conn)
             return lookup(path) is not None
+
+        return self._storage(run)
 
     def create_disk_overlay(self, base_image: str, path: str) -> None:
         try:
@@ -409,27 +468,33 @@ class LibvirtDriver:
         except ValueError as e:
             raise DriverError(f"invalid base image: {e}") from e
         self._check_disk_path(path)
-        with self._op(self._disk_uri()) as conn:
+
+        def run(conn) -> None:
             pools, lookup = self._find_volume(conn)
             if lookup(path) is not None:
-                raise DriverError(f"disk {path} already exists")
+                raise _Precondition(f"disk {path} already exists")
             bvol = lookup(base)
             if bvol is None:
-                raise DriverError(f"base image {base} not found")
+                raise _Precondition(f"base image {base} not found")
             capacity = bvol.info()[1]
             root = ET.fromstring(bvol.XMLDesc(0))
             fmt = root.find("target/format")
             bfmt = fmt.get("type") if fmt is not None else "qcow2"
             pools[1].createXML(overlay_volume_xml(os.path.basename(path), capacity, base, bfmt), 0)
 
+        self._storage(run)
+
     def delete_disk(self, path: str) -> None:
         self._check_disk_path(path)
-        with self._op(self._disk_uri()) as conn:
+
+        def run(conn) -> None:
             _, lookup = self._find_volume(conn)
             vol = lookup(path)
             if vol is None:
-                raise DriverError(f"disk {path} not found")
+                raise _Precondition(f"disk {path} not found")
             vol.delete(0)
+
+        self._storage(run)
 
     # ---- migration (D-026, FR-3.2) ----
 
