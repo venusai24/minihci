@@ -168,10 +168,14 @@ def hosts_add(
     ctx: typer.Context,
     name: str,
     uri: str,
+    site: str = typer.Option("primary", "--site", help="primary or dr"),
     idempotency_key: str | None = IDEMPOTENCY_OPT,
     wait: bool = WAIT_OPT,
 ) -> None:
-    submit(ctx, "POST", "/hosts", {"name": name, "libvirt_uri": uri}, idempotency_key, wait)
+    body: dict[str, Any] = {"name": name, "libvirt_uri": uri}
+    if site != "primary":
+        body["site"] = site
+    submit(ctx, "POST", "/hosts", body, idempotency_key, wait)
 
 
 @hosts_app.command("list")

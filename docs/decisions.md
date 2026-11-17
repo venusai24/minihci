@@ -511,3 +511,33 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
 - **Decision:** `MINIHCI_API_TOKEN` (setting `api_token`). Unset or empty keeps today's behaviour (open). When set, every router (hosts, vms, tasks, metrics, scheduler) requires `Authorization: Bearer <token>`, compared in constant time; failures return 401 with `WWW-Authenticate: Bearer`, before body validation. `/healthz` stays open for probes. The CLI sends the token from `--token` or `MINIHCI_API_TOKEN`.
 - **Consequences:** One shared secret, no users, roles or rotation, and no TLS, so the token travels in clear text unless a proxy terminates TLS. `/docs` and `/openapi.json` stay open (schema only). A Prometheus scrape of `/metrics` needs `authorization` configured. The workers and the reconciler do not use the API and are unaffected.
 - **How to undo:** Drop the `dependencies=auth` argument from the `include_router` calls in `app.py`.
+
+## D-033 DR site: hosts with `site='dr'` plus one share at the same path everywhere
+- **Context:** The PRD gives the DR site a separate NFS export but no compute and no paths.
+- **Decision:** `hosts.site` (`primary`|`dr`, default `primary`). A DR host is registered like any other host (`POST /hosts` with `site`, `minihci hosts add NAME URI --site dr`); `fits()` refuses it unless `allow_dr`, so creation, migration, the rebalancer and HA never place on it. Replicas and failover disks live flat in `Settings.dr_root` (pool `minihci-dr`), which hosts mount from `$NFS_DIR/dr` at the same path the laptop serves it from, so no path translation is needed. In the lab the DR host is the laptop (`qemu:///system`), which keeps running when host1-3 are destroyed.
+- **Consequences:** Both "sites" are one physical machine and one NFS server, so this simulates a site loss and does not survive a real one. The control plane is not replicated (PRD non-goal).
+- **How to undo:** Drop the column and the `fits()` guard.
+
+## D-034 Replication method: libvirt push backups with checkpoints into qcow2 chains made before the backup starts
+- **Context:** Replicas must be bootable on the DR host and cheap after the first copy.
+- **Decision:** Each replica is one `backupBegin` (push, `REUSE_EXTERNAL`) of `vda` into a file MiniHCI creates first: a blank qcow2 for a full copy, an overlay on the previous replica for an incremental one, so the chain is bootable as it stands. The checkpoint `minihci-r{id}` is created by the same call, so it is crash-consistent at the moment the backup starts, and `snapshot_time` is committed just before the call (conservative). Only VMs `running` on a `ready` primary host are replicated; a stopped VM keeps its last replica and its lag grows. Full when: first, chain length reached `retention`, the last checkpoint is missing on the current host (migration, HA restart), or the last file is missing. The migrate step deletes `minihci-*` checkpoints first (dropping them is chosen so behaviour is the same after any move). `undefine` passes `CHECKPOINTS_METADATA`. A checkpoint counts only once its replica row is `succeeded`; a re-run backup step deletes its own checkpoint and target first.
+- **Consequences:** Needs libvirt with incremental backup support on the primary hosts. Chains grow until `retention` is reached (D-035).
+- **How to undo:** Pull mode (NBD) would remove the target-file step but needs an NBD client in MiniHCI.
+
+## D-035 Retention: new chain every `retention` replicas, prune whole chains
+- **Context:** Old replicas must be deleted without merging qcow2 files.
+- **Decision:** Keep the newest `retention` replicas plus their backing ancestors; everything else is deleted children-first and its row kept as `pruned` (RPO history needs the times). At most `2*retention - 1` files exist per VM, and one full copy is taken per `retention` syncs. No qcow2 merge/commit, because no libvirt API does that for files that are not attached to a domain. Deleting a VM leaves its replicas (that is what a DR copy is for).
+- **Consequences:** No automatic cleanup after a VM is deleted; DR storage use is up to about twice `retention` copies per VM.
+- **How to undo:** A commit-based merge of the oldest increment would need host shell access, which this design avoids.
+
+## D-036 Scheduling and RPO definitions
+- **Context:** NFR-8 needs a measurable RPO.
+- **Decision:** The `replicator` thread (`replication_tick_s=5`) enqueues `vm.replicate` when `now - last snapshot_time >= interval_s`, with nothing else open on the VM, and backs off `replication_retry_s=60` after a failed attempt. Lag = `now - last snapshot_time` (what a site loss right now would cost). Achieved RPO = max over consecutive replicas of `finished_at[i] - snapshot_time[i-1]` within 24 h (the exposure until the next copy was usable). Within target = `max(achieved, lag) <= interval_s + 30` (NFR-8).
+- **Consequences:** Expected achieved RPO is about interval + tick + backup duration. A long migration or other task on the VM delays replication, and that delay shows up as lag.
+- **How to undo:** Change the settings, or add a per-policy "next due" column for exact intervals.
+
+## D-037 Failover: fenced like HA, boots an overlay on the replica, disables protection, no failback
+- **Context:** FR for DR failover when the primary site is lost.
+- **Decision:** `POST /vms/{id}/failover` requires the VM's host to be `dead` (D-027) unless `force`. The task re-checks this under lock (3, 0) and refuses if the old host answers with the domain active; `force` destroys it instead. The DR copy runs from a fresh overlay `vm{id}-failover-t{task}.qcow2` on top of the chosen replica (the latest by default), so the replica chain stays untouched and can be used again. Afterwards the VM row points at the DR host and disk, protection is disabled, and HA leaves the VM alone because its host is `ready`. `data_loss_s = primary last heartbeat - replica snapshot_time` (null for a forced failover of a live primary).
+- **Consequences:** No failback or reverse replication. Writes after the replica are lost by design. A partitioned primary that is still alive while `dead` (D-028 limits) could keep running its copy beside the DR copy: they write different disks, but two guests with one identity would be live.
+- **How to undo:** Remove the route and the task type; the data model stays.

@@ -36,6 +36,7 @@ def test_register_host_returns_202_and_pending_task(client):
             "name": "a",
             "libvirt_uri": URI,
             "status": "registering",
+            "site": "primary",
             "cpu_total": None,
             "mem_total_mb": None,
         }
@@ -255,3 +256,17 @@ def test_heartbeat_acceptance_suspect_dead_recovery_and_metrics(client, session_
     h = client.get(f"/hosts/{hid}/health").json()
     assert (h["status"], h["missed_heartbeats"]) == ("ready", 0)
     assert 'minihci_host_status{host="a",status="ready"} 1.0' in client.get("/metrics").text
+
+
+def test_register_dr_host(client, session_factory):
+    from minihci.models import Host
+
+    r = client.post("/hosts", json={"name": "d", "libvirt_uri": URI, "site": "dr"})
+    assert r.status_code == 202
+    with session_factory() as s:
+        assert s.get(Host, r.json()["target_id"]).site == "dr"
+    assert client.get("/hosts").json()[0]["site"] == "dr"
+
+
+def test_register_bad_site_422(client):
+    assert client.post("/hosts", json={"name": "d", "libvirt_uri": URI, "site": "backup"}).status_code == 422

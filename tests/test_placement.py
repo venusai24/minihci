@@ -59,3 +59,13 @@ def test_place_no_capacity(hosts, usage, vm):
 
 def test_placeable_statuses():
     assert PLACEABLE_STATUSES == ("ready",)
+
+
+def test_fits_rejects_dr_site_host():
+    from minihci.scheduler.placement import fits
+
+    dr = NS(id=1, status="ready", cpu_total=10, mem_total_mb=1000, site="dr")
+    assert not fits(req(), dr, {}, CFG)
+    assert fits(req(), dr, {}, CFG, allow_dr=True)
+    with pytest.raises(NoCapacity):
+        place(req(), [dr], {}, CFG)

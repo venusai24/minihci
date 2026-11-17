@@ -1,5 +1,5 @@
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -19,6 +19,7 @@ router = APIRouter()
 class HostIn(BaseModel):
     name: str = Field(min_length=1, max_length=63)
     libvirt_uri: str = Field(min_length=1)
+    site: Literal["primary", "dr"] = "primary"
 
 
 @router.post("/hosts", status_code=202)
@@ -35,7 +36,7 @@ def register_host(
         ).first()
         if taken is not None:
             raise HTTPException(409, "host name or libvirt_uri already registered")
-        host = Host(name=body.name, libvirt_uri=body.libvirt_uri, status="registering")
+        host = Host(name=body.name, libvirt_uri=body.libvirt_uri, site=body.site, status="registering")
         s.add(host)
         s.flush()
         return enqueue(s, "host.register", host.id, {})
@@ -93,6 +94,7 @@ def list_hosts(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
             "name": h.name,
             "libvirt_uri": h.libvirt_uri,
             "status": h.status,
+            "site": h.site,
             "cpu_total": h.cpu_total,
             "mem_total_mb": h.mem_total_mb,
         }

@@ -7,8 +7,13 @@ class NoCapacity(Exception):
     """No host can take the requested VM."""
 
 
-def fits(vm_req, host, usage, config) -> bool:
-    """True if host is placeable and has memory and CPU headroom left for vm_req."""
+def fits(vm_req, host, usage, config, allow_dr: bool = False) -> bool:
+    """True if host is placeable and has memory and CPU headroom left for vm_req.
+
+    DR-site hosts (D-033) are refused unless allow_dr is set (only the DR failover passes it).
+    """
+    if not allow_dr and getattr(host, "site", "primary") != "primary":
+        return False
     if host.status not in PLACEABLE_STATUSES:
         return False
     if host.cpu_total is None or host.mem_total_mb is None:

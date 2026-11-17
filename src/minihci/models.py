@@ -12,6 +12,7 @@ from sqlalchemy import (
     false,
     func,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import JSONB, REAL
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -27,6 +28,7 @@ class Host(Base):
         CheckConstraint(
             "status in ('registering','ready','suspect','dead','failed','removing','removed')", name="ck_hosts_status"
         ),
+        CheckConstraint("site in ('primary','dr')", name="ck_hosts_site"),
         Index("uq_hosts_name_live", "name", unique=True, postgresql_where=text("status <> 'removed'")),
         Index("uq_hosts_uri_live", "libvirt_uri", unique=True, postgresql_where=text("status <> 'removed'")),
     )
@@ -39,6 +41,7 @@ class Host(Base):
     status: Mapped[str] = mapped_column(default="registering", server_default="registering")
     last_heartbeat: Mapped[datetime | None]
     missed_heartbeats: Mapped[int] = mapped_column(default=0, server_default="0")
+    site: Mapped[str] = mapped_column(default="primary", server_default="primary")
 
 
 class Vm(Base):
@@ -158,3 +161,67 @@ class HaRestart(Base):
     running_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recovery_ms: Mapped[int | None]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProtectionPolicy(Base):
+    __tablename__ = "protection_policies"
+    __table_args__ = (
+        CheckConstraint("interval_s between 30 and 86400", name="ck_protection_policies_interval"),
+        CheckConstraint("retention between 1 and 100", name="ck_protection_policies_retention"),
+    )
+
+    vm_id: Mapped[int] = mapped_column(ForeignKey("vms.id"), primary_key=True)
+    interval_s: Mapped[int]
+    retention: Mapped[int]
+    enabled: Mapped[bool] = mapped_column(default=True, server_default=true())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Replica(Base):
+    __tablename__ = "replicas"
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_replicas_task_id"),
+        CheckConstraint("mode in ('full','incremental')", name="ck_replicas_mode"),
+        CheckConstraint("status in ('running','succeeded','failed','pruned')", name="ck_replicas_status"),
+        CheckConstraint("seq >= 0", name="ck_replicas_seq"),
+        Index("ix_replicas_vm_status_time", "vm_id", "status", "snapshot_time"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    vm_id: Mapped[int] = mapped_column(ForeignKey("vms.id"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id"))  # where the copy was taken
+    mode: Mapped[str]
+    status: Mapped[str] = mapped_column(default="running", server_default="running")
+    # chain_id, dr_path, checkpoint, snapshot_time are set from the row id right after the insert
+    chain_id: Mapped[int | None] = mapped_column(BigInteger)  # id of the chain's full replica; a full points at itself
+    seq: Mapped[int]
+    dr_path: Mapped[str | None]
+    checkpoint: Mapped[str | None]
+    since_checkpoint: Mapped[str | None]
+    backing_path: Mapped[str | None]
+    snapshot_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None]
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DrFailover(Base):
+    __tablename__ = "dr_failovers"
+    __table_args__ = (UniqueConstraint("task_id", name="uq_dr_failovers_task_id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    vm_id: Mapped[int] = mapped_column(ForeignKey("vms.id"))
+    replica_id: Mapped[int] = mapped_column(ForeignKey("replicas.id"))
+    from_host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id"))
+    dr_host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id"))
+    from_disk_path: Mapped[str]
+    disk_path: Mapped[str]
+    forced: Mapped[bool] = mapped_column(default=False, server_default=false())
+    primary_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    running_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failover_ms: Mapped[int | None]
+    data_loss_s: Mapped[float | None] = mapped_column(REAL)
