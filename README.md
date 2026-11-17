@@ -278,7 +278,9 @@ probably NFS client lock retry, but that is not verified.
 |---|---|---|---|
 | Full copy size | 50532352 bytes | `probe_dr.py Q3, CirrOS idle 60 s, n=1, preliminary` | preliminary |
 | Incremental size after 60 s idle | 724992 bytes | `probe_dr.py Q3, CirrOS idle 60 s, n=1, preliminary` | preliminary |
-| Sync time (full / incremental) | TBD | `bench_dr.py` (not run) | TBD |
+| Sync time, incremental, 8 MiB written per round (median / worst) | 553 ms / 564 ms (n=5) | `bench_dr.py --rounds 5`, `docs/benchmarks/dr-bench-2026-11-17.md` | preliminary |
+| Incremental size, 8 MiB written per round (median / worst) | 9179136 / 9310208 bytes (n=5) | `bench_dr.py --rounds 5`, `docs/benchmarks/dr-bench-2026-11-17.md` | preliminary |
+| Sync time, full copy | TBD (no full copy in the run) | `bench_dr.py` | TBD |
 | Achieved RPO | TBD | `acceptance_m5.py` (not run; `within_target` ignores backup duration, see M5 limitations) | TBD |
 | Data loss, API `data_loss_s` (lower bound, control-plane clock) | TBD | `acceptance_m5.py` (not run) | TBD |
 | Failover time | TBD | `acceptance_m5.py` (not run) | TBD |
