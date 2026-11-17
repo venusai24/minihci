@@ -231,7 +231,7 @@ def q3(dr, full, inc, idle):
     record("Q3", True, json.dumps({"idle_s": idle, "full_alloc_bytes": a_full, "incr_alloc_bytes": a_inc}))
 
 
-def q4(dom, src, dst, dst_uri):
+def q4(dom, src, dst, dst_uri, disk):
     facts = {}
     ok = True
     if dst is None:
@@ -247,14 +247,25 @@ def q4(dom, src, dst, dst_uri):
             dom = back
         except lv.libvirtError as e:
             facts["migrate3"] = f"refused: {e}"
+    # The migrate above drops checkpoints (they do not travel), so the undefine tests
+    # need a fresh checkpoint on the domain, or they answer nothing about checkpoints.
     dom = src.lookupByName(NAME)
+    dom.checkpointCreateXML(checkpoint_xml("cp-q4"), 0)
+    facts["checkpoints_before_undefine"] = checkpoint_names(dom)
     dom.destroy()  # undefine() with checkpoints is only checked on an inactive domain
     try:
         dom.undefine()
         facts["undefine"] = "NOT refused"
         ok = False
+        # The plain undefine removed the domain. Rebuild it with a checkpoint so the
+        # flagged undefine is tested on a domain that has one.
+        dom = src.defineXML(domain_xml(NAME, disk))
+        dom.create()
+        dom.checkpointCreateXML(checkpoint_xml("cp-q4b"), 0)
+        dom.destroy()
     except lv.libvirtError as e:
         facts["undefine"] = f"refused: {e}"
+    facts["checkpoints_before_flagged"] = checkpoint_names(dom)
     try:
         dom.undefineFlags(lv.VIR_DOMAIN_UNDEFINE_CHECKPOINTS_METADATA)
         facts["undefineFlags_CHECKPOINTS_METADATA"] = "ok"
@@ -373,7 +384,7 @@ def main():
         guarded("Q1", q1, src, dom, full, cap)
         guarded("Q2", q2, dom, a.disk, full, inc, a.src)
         guarded("Q3", q3, dr, full, inc, a.idle)
-        guarded("Q4", q4, dom, src, dst, a.dst_uri)
+        guarded("Q4", q4, dom, src, dst, a.dst_uri, a.disk)
         dom5 = guarded("Q5", q5, src, a.disk, blank, cap, pools)
         if dom5 is not None:
             guarded("Q6", q6, dom5, blank2, cap, pools, dr)
