@@ -1,5 +1,6 @@
 """One suite for every HostDriver implementation (FR-1, FR-2, FR-2.1, FR-3.2)."""
 
+import time
 from contextlib import contextmanager
 
 import pytest
@@ -202,6 +203,49 @@ def test_backup_since_missing_raises_checkpoint_not_found(env: Env):
         finally:
             if d.disk_exists(t0):
                 d.delete_disk(t0)
+
+
+def _delete_when_unlocked(d, path: str, tries: int = 10) -> None:
+    """A target a host has just written can stay locked for a few seconds (probe Q6: 6 s); retry."""
+    for i in range(tries):
+        try:
+            if d.disk_exists(path):
+                d.delete_disk(path)
+            return
+        except DriverError:
+            if i == tries - 1:
+                raise
+            time.sleep(3)
+
+
+def test_backup_timeout_aborts_and_leaves_no_checkpoint(env: Env, monkeypatch):
+    """Real libvirt leaves the new checkpoint behind after abortJob (probe Q6, 2026-11-17), so a
+    timed-out backup must still end with no checkpoint, and the same name must be usable again.
+    Real hosts only: the fake's abort path is covered by tests/test_fake_backup.py."""
+    from minihci.driver.libvirt import LibvirtDriver
+
+    d = env.driver
+    if not isinstance(d, LibvirtDriver):
+        pytest.skip("abortJob leaving the checkpoint is a real-libvirt behaviour")
+    with vm(env, start=True) as (name, disk, _):
+        aborted, retry = env.dr_disk(name + "-abort"), env.dr_disk(name + "-retry")
+        try:
+            d.create_blank_disk(aborted, like=disk)
+            monkeypatch.setattr(d, "_backup_timeout_s", 0)  # the first poll sees a running job and aborts it
+            try:
+                d.backup_domain(env.uri1, name, aborted, "c-abort", None)
+            except DriverError as e:
+                assert "timed out" in str(e), f"expected a timeout, got: {e}"  # "still present" = the bug
+            else:
+                pytest.skip("the backup finished before the zero timeout could fire; use a bigger guest disk")
+            assert d.list_checkpoints(env.uri1, name) == []
+            monkeypatch.setattr(d, "_backup_timeout_s", 1800)
+            d.create_blank_disk(retry, like=disk)
+            d.backup_domain(env.uri1, name, retry, "c-abort", None)  # fails if the aborted checkpoint survived
+            assert d.list_checkpoints(env.uri1, name) == ["c-abort"]
+        finally:
+            for t in (retry, aborted):
+                _delete_when_unlocked(d, t)
 
 
 def test_blank_disk_exists_and_deletes(env: Env):
