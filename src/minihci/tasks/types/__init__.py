@@ -5,6 +5,7 @@ from minihci.tasks.types import (
     scheduler_config_set,  # noqa: F401
     vm_create,  # noqa: F401
     vm_delete,  # noqa: F401
+    vm_dr_failover,  # noqa: F401
     vm_ha_restart,  # noqa: F401
     vm_migrate,  # noqa: F401
     vm_power,  # noqa: F401

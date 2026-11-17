@@ -5,14 +5,17 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from minihci.api.deps import get_session
 from minihci.api.idempotency import fingerprint, run_idempotent
 from minihci.dr.chain import RPO_WINDOW, ReplicaInfo, rpo_status
 from minihci.models import Host, ProtectionPolicy, Replica, Task, Vm
+from minihci.scheduler.config import load_config
+from minihci.scheduler.placement import PLACEABLE_STATUSES, fits
 from minihci.tasks.engine import enqueue
+from minihci.tasks.locks import LOCK_NAMESPACE
 
 log = logging.getLogger("minihci.api")
 router = APIRouter()
@@ -22,6 +25,12 @@ class ProtectionIn(BaseModel):
     interval_s: int = Field(ge=30, le=86400)
     retention: int = Field(ge=1, le=100)
     enabled: bool = True
+
+
+class FailoverIn(BaseModel):
+    replica_id: int | None = None
+    host_id: int | None = None
+    force: bool = False
 
 
 def _now() -> datetime:
@@ -162,3 +171,89 @@ def replication(session: Session = Depends(get_session)) -> list[dict[str, Any]]
         .order_by(ProtectionPolicy.vm_id)
     ).all()
     return [{**protection_status(session, p, now), "vm_name": name} for p, name in rows]
+
+
+@router.post("/vms/{vm_id}/failover", status_code=202)
+def failover_vm(
+    vm_id: int,
+    request: Request,
+    body: FailoverIn | None = None,
+    idempotency_key: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    """D-037. Checks run in one transaction holding the VM row FOR UPDATE and the scheduler lock (3, 0); the task
+    re-checks the fence itself under (3, 0). The resolved replica and DR host go into the params, so a replay with
+    the same Idempotency-Key returns the original task even if a newer replica has appeared since."""
+    body = body or FailoverIn()
+
+    def create(s: Session):
+        vm = s.scalars(select(Vm).where(Vm.id == vm_id).with_for_update()).first()
+        if vm is None or vm.desired_state == "absent":
+            raise HTTPException(404, "vm not found")
+        # Before the scheduler lock, as the HA failover pass does (no deadlock with vm.migrate.check_destination).
+        busy = s.scalars(
+            select(Task.id).where(
+                Task.type.like("vm.%"), Task.target_id == vm_id, Task.state.in_(("pending", "running"))
+            )
+        ).first()
+        if busy is not None:
+            raise HTTPException(409, "vm has an open task")
+        s.execute(text("SELECT pg_advisory_xact_lock(:ns, 0)"), {"ns": LOCK_NAMESPACE["scheduler"]})
+        src = s.get(Host, vm.host_id)
+        if src.site == "dr":
+            raise HTTPException(409, "vm already runs at the DR site")
+        if src.status != "dead" and not body.force:
+            raise HTTPException(409, f"host {src.name} is {src.status}, not dead; use force to fail over anyway")
+        if body.replica_id is not None:
+            replica = s.get(Replica, body.replica_id)
+            if replica is None or replica.vm_id != vm_id or replica.status != "succeeded":
+                raise HTTPException(409, f"replica {body.replica_id} is not a succeeded replica of this vm")
+        else:
+            replica = s.scalars(
+                select(Replica)
+                .where(Replica.vm_id == vm_id, Replica.status == "succeeded")
+                .order_by(Replica.snapshot_time.desc(), Replica.id.desc())
+                .limit(1)
+            ).first()
+            if replica is None:
+                raise HTTPException(409, "vm has no succeeded replica")
+        q = select(Host).where(Host.site == "dr", Host.status.in_(PLACEABLE_STATUSES))
+        if body.host_id is not None:
+            q = q.where(Host.id == body.host_id)
+        candidates = list(s.scalars(q.order_by(Host.id).with_for_update(read=True)))
+        if not candidates:
+            raise HTTPException(
+                409, "no ready DR-site host" if body.host_id is None else "host is not a ready DR-site host"
+            )
+        rows = s.execute(
+            select(Vm.host_id, func.sum(Vm.vcpus), func.sum(Vm.mem_mb))
+            .where(Vm.desired_state != "absent", Vm.id != vm_id)
+            .group_by(Vm.host_id)
+        )
+        usage = {hid: (int(cpu), int(mem)) for hid, cpu, mem in rows}
+        config = load_config(s)
+        # the only caller that passes allow_dr (D-033)
+        dr_host = next((h for h in candidates if fits(vm, h, usage, config, allow_dr=True)), None)
+        if dr_host is None:
+            raise HTTPException(409, "DR-site host has no capacity for this vm")
+        params = {"replica_id": replica.id, "dr_host_id": dr_host.id, "force": body.force}
+        return enqueue(s, "vm.dr_failover", vm_id, params)
+
+    task, created = run_idempotent(
+        request.app.state.session_factory,
+        idempotency_key,
+        fingerprint(
+            {
+                "op": "vm.dr_failover",
+                "vm_id": vm_id,
+                "replica_id": body.replica_id,
+                "host_id": body.host_id,
+                "force": body.force,
+            }
+        ),
+        create,
+    )
+    headers = {"Location": f"/tasks/{task.id}"}
+    if not created:
+        headers["Idempotent-Replayed"] = "true"
+    log.info("task_enqueued", extra={"fields": {"task_id": task.id}})
+    return JSONResponse({"task_id": task.id, "target_id": task.target_id}, status_code=202, headers=headers)
