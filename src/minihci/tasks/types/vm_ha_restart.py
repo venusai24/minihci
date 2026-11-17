@@ -69,6 +69,17 @@ def choose_host(ctx: StepContext) -> None:
             .group_by(Vm.host_id)
         )
         usage = {hid: (int(c), int(m)) for hid, c, m in rows}
+        # Other restarts already placed but not yet running still point at the dead host: count them on their target.
+        inflight = s.execute(
+            select(HaRestart.to_host_id, func.sum(Vm.vcpus), func.sum(Vm.mem_mb))
+            .join(Vm, Vm.id == HaRestart.vm_id)
+            .join(Task, Task.id == HaRestart.task_id)
+            .where(HaRestart.running_at.is_(None), Task.state.in_(("pending", "running")), Vm.id != vm.id)
+            .group_by(HaRestart.to_host_id)
+        )
+        for hid, c, m in inflight:
+            used_c, used_m = usage.get(hid, (0, 0))
+            usage[hid] = (used_c + int(c), used_m + int(m))
         try:
             target = place(vm, list(s.scalars(select(Host).order_by(Host.id))), usage, load_config(s))
         except NoCapacity as e:
@@ -137,7 +148,8 @@ def mark_running(ctx: StepContext) -> None:
         if row.running_at is None:
             now = datetime.now(UTC)
             row.running_at = now
-            row.recovery_ms = max(0, int((now - row.failed_at).total_seconds() * 1000))
+            # the column is int32: clamp, or a long outage (>24 days) makes this step fail forever
+            row.recovery_ms = min(2**31 - 1, max(0, int((now - row.failed_at).total_seconds() * 1000)))
 
 
 def mark_pending_restart(ctx: StepContext) -> None:

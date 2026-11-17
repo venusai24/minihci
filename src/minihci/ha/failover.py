@@ -55,26 +55,42 @@ def _handle(session_factory: sessionmaker[Session], vm_id: int, settings: Settin
         s.refresh(host)
         if host.status != "dead":
             return
-        rows = s.execute(
-            select(Vm.host_id, func.sum(Vm.vcpus), func.sum(Vm.mem_mb))
-            .where(Vm.desired_state != "absent", Vm.id != vm.id)
-            .group_by(Vm.host_id)
+        failed_at = (
+            host.last_heartbeat.replace(tzinfo=UTC)
+            if host.last_heartbeat
+            else datetime.now(UTC) - timedelta(seconds=settings.heartbeat_dead_after_s)
+        ).isoformat()
+        # Same outage = same failed_at. Stop retrying a restart that keeps failing; the VM waits in pending_restart.
+        failures = s.scalar(
+            select(func.count(Task.id)).where(
+                Task.type == "vm.ha_restart",
+                Task.target_id == vm.id,
+                Task.state.in_(("failed", "rolled_back")),
+                Task.params["failed_at"].astext == failed_at,
+            )
         )
-        usage = {hid: (int(c), int(m)) for hid, c, m in rows}
-        try:
-            place(vm, list(s.scalars(select(Host).order_by(Host.id))), usage, load_config(s))
-        except NoCapacity:
+        if failures >= settings.ha_restart_max_attempts:
             if vm.actual_state != "pending_restart":
                 vm.actual_state = "pending_restart"
-                event = {"event": "ha_pending_restart", "vm_id": vm.id, "dead_host_id": host.id}
+                event = {"event": "ha_restart_gave_up", "vm_id": vm.id, "dead_host_id": host.id, "failures": failures}
                 level = logging.WARNING
         else:
-            if host.last_heartbeat:
-                hb = host.last_heartbeat.replace(tzinfo=UTC)
+            rows = s.execute(
+                select(Vm.host_id, func.sum(Vm.vcpus), func.sum(Vm.mem_mb))
+                .where(Vm.desired_state != "absent", Vm.id != vm.id)
+                .group_by(Vm.host_id)
+            )
+            usage = {hid: (int(c), int(m)) for hid, c, m in rows}
+            try:
+                place(vm, list(s.scalars(select(Host).order_by(Host.id))), usage, load_config(s))
+            except NoCapacity:
+                if vm.actual_state != "pending_restart":
+                    vm.actual_state = "pending_restart"
+                    event = {"event": "ha_pending_restart", "vm_id": vm.id, "dead_host_id": host.id}
+                    level = logging.WARNING
             else:
-                hb = datetime.now(UTC) - timedelta(seconds=settings.heartbeat_dead_after_s)
-            task = enqueue(s, "vm.ha_restart", vm.id, {"dead_host_id": host.id, "failed_at": hb.isoformat()})
-            event = {"event": "ha_restart_enqueued", "task_id": task.id, "vm_id": vm.id, "dead_host_id": host.id}
+                task = enqueue(s, "vm.ha_restart", vm.id, {"dead_host_id": host.id, "failed_at": failed_at})
+                event = {"event": "ha_restart_enqueued", "task_id": task.id, "vm_id": vm.id, "dead_host_id": host.id}
     if event:
         log.log(level, event["event"], extra={"fields": event})
 

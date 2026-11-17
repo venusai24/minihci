@@ -26,5 +26,6 @@ class Settings(BaseSettings):
     heartbeat_ping_timeout_s: float = 3
     heartbeat_suspect_misses: int = 3
     heartbeat_dead_after_s: float = 30
+    ha_restart_max_attempts: int = 3  # failed restart tasks per VM per host outage, then it waits in pending_restart
     max_attempts: int = 3
     vm_shutdown_timeout_s: float = 60
