@@ -45,6 +45,15 @@ def main(argv: list[str] | None = None) -> int:
     if singleton is None:
         logger.error("another worker already holds the singleton lock; exiting")
         return 1
+    stop = threading.Event()
+
+    def _stop(signum: int, _frame: FrameType | None) -> None:
+        logger.info("signal %d received; stopping", signum)
+        stop.set()
+
+    # Install before recovery/reconcile so a SIGTERM during startup is not lost.
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
     try:
         session_factory = make_session_factory(engine)
         driver = build_driver(settings)
@@ -62,14 +71,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         except Exception:
             logger.exception("initial reconcile pass failed")
-        stop = threading.Event()
-
-        def _stop(signum: int, _frame: FrameType | None) -> None:
-            logger.info("signal %d received; stopping", signum)
-            stop.set()
-
-        signal.signal(signal.SIGTERM, _stop)
-        signal.signal(signal.SIGINT, _stop)
         threads = [
             threading.Thread(
                 target=Worker(session_factory, driver, settings, REGISTRY).run_forever,

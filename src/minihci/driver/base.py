@@ -57,7 +57,9 @@ class HostDriver(Protocol):
     def undefine_domain(self, uri: str, name: str) -> None: ...  # DomainNotFound; DriverError if running
     def start_domain(self, uri: str, name: str) -> None: ...  # DriverError if already running
     def destroy_domain(self, uri: str, name: str) -> None: ...  # DriverError if not running
-    def shutdown_domain(self, uri: str, name: str) -> None: ...  # graceful; DriverError if not running
+    # shutdown_domain: graceful and asynchronous. Raises DomainNotFound if the domain is missing,
+    # DriverError if not running; may return before the domain is actually off.
+    def shutdown_domain(self, uri: str, name: str) -> None: ...
     def reboot_domain(self, uri: str, name: str) -> None: ...  # DomainNotFound; DriverError if not running
     def disk_exists(self, path: str) -> bool: ...
     def create_disk_overlay(self, base_image: str, path: str) -> None: ...  # DriverError if path exists
