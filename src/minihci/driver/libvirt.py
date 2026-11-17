@@ -618,7 +618,7 @@ class LibvirtDriver:
         rows = []
         for cp in dom.listAllCheckpoints(0):
             ctime = int(ET.fromstring(cp.getXMLDesc(0)).findtext("creationTime") or 0)
-            rows.append((ctime, cp.name()))
+            rows.append((ctime, cp.getName()))
         return [n for _, n in sorted(rows)]
 
     def list_checkpoints(self, uri: str, name: str) -> list[str]:

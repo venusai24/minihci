@@ -175,7 +175,7 @@ class FakeCheckpoint:
     def __init__(self, dom, name, ctime):
         self.dom, self._name, self.ctime = dom, name, ctime
 
-    def name(self):
+    def getName(self):  # the real libvirt-python binding has getName(), not name()
         return self._name
 
     def getXMLDesc(self, flags=0):
