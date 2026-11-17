@@ -192,6 +192,17 @@ class LibvirtConnections:
         return bool(result and result[0])
 
 
+def _is_system_error(e: BaseException, lib: ModuleType) -> bool:
+    return e.get_error_code() == getattr(lib, "VIR_ERR_SYSTEM_ERROR", object())
+
+
+def _conn_alive(conn: object, lib: ModuleType) -> bool:
+    try:
+        return bool(conn.isAlive())
+    except lib.libvirtError:
+        return False
+
+
 def _quiet_close(conn: object) -> None:
     with contextlib.suppress(Exception):
         conn.unregisterCloseCallback()
@@ -253,6 +264,10 @@ class LibvirtDriver:
             yield conn
         except lib.libvirtError as e:
             err = map_error(e, lib)
+            if isinstance(err, HostUnreachable) and _is_system_error(e, lib) and _conn_alive(conn, lib):
+                # SYSTEM_ERROR is also what a failed disk open or permission error looks like; with the
+                # connection still alive the host is reachable and this is an ordinary operation failure.
+                err = DriverError(str(e))
             if isinstance(err, HostUnreachable):
                 self._conns.evict(uri, conn)
             raise err from e

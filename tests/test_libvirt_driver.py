@@ -221,3 +221,33 @@ def test_list_domains_skips_domain_vanishing_mid_listing(drv, stub_libvirt):
     drv.define_domain(U1, DomainSpec(name="vm2", vcpus=1, mem_mb=256, disk_path="/x/vm2.qcow2"))
     stub_libvirt.host(U1).domains["vm1"].defined = False
     assert drv.list_domains(U1) == {"vm2": DomainState.SHUT_OFF}
+
+
+def _fail_start_with_system_error(stub_libvirt, drv, kill_conn=False):
+    from tests.stubs.fake_libvirt import _err
+
+    drv.define_domain(U1, SPEC)
+    conn = drv._conns.get(U1)
+
+    def boom():
+        if kill_conn:
+            conn.alive = False  # the connection dies during the call, as on a real reset
+        raise _err("VIR_ERR_SYSTEM_ERROR", "Cannot open disk: Permission denied")
+
+    stub_libvirt.host(U1).domains["vm1"].create = boom
+    return conn
+
+
+def test_system_error_on_a_live_connection_is_a_driver_error_not_unreachable(drv, stub_libvirt):
+    conn = _fail_start_with_system_error(stub_libvirt, drv)
+    with pytest.raises(DriverError) as ei:
+        drv.start_domain(U1, "vm1")
+    assert not isinstance(ei.value, HostUnreachable)
+    assert drv._conns._conns.get(U1) is conn  # connection kept
+
+
+def test_system_error_on_a_dead_connection_is_unreachable_and_evicts(drv, stub_libvirt):
+    _fail_start_with_system_error(stub_libvirt, drv, kill_conn=True)
+    with pytest.raises(HostUnreachable):
+        drv.start_domain(U1, "vm1")
+    assert U1 not in drv._conns.cached_uris()
