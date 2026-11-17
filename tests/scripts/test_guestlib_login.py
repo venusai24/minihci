@@ -43,6 +43,15 @@ def test_login_gives_up_after_the_total_window():
     assert child.sent == ["", "", ""]
 
 
+def test_login_starts_over_when_the_password_step_fails():
+    # Real case (2026-11-17): the username was lost before the guest was ready, the password was
+    # then refused, and the login prompt came back. The whole login must be retried, not abandoned.
+    child = FakeChild([0, 1, "timeout", 0, 1, 2])
+    guestlib.login_with(child, "cirros", "gocubsgo")
+    assert child.sent == ["", "cirros", "gocubsgo", "", "cirros", "gocubsgo"]
+    assert child.events == []
+
+
 def test_login_skips_password_when_already_at_a_shell():
     child = FakeChild([2])
     guestlib.login_with(child, "cirros", "gocubsgo")

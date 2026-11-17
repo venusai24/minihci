@@ -26,19 +26,21 @@ def login_with(child, user: str, password: str, attempts: int = 12, window_s: fl
     import pexpect
 
     for _ in range(attempts):
+        # Any step can be lost while the guest is busy (a username typed before the login prompt
+        # is ready, a refused password): then start over from a fresh newline.
         child.sendline("")
         try:
             i = child.expect([LOGIN, PASSWORD, PROMPT], timeout=window_s)
+            if i == 0:
+                child.sendline(user)
+                child.expect(PASSWORD, timeout=window_s)
+                i = 1
+            if i == 1:
+                child.sendline(password)
+                child.expect(PROMPT, timeout=window_s)
+            return
         except pexpect.TIMEOUT:
             continue
-        if i == 0:
-            child.sendline(user)
-            child.expect(PASSWORD, timeout=window_s)
-            i = 1
-        if i == 1:
-            child.sendline(password)
-            child.expect(PROMPT, timeout=window_s)
-        return
     raise pexpect.TIMEOUT(f"no login or shell prompt after {attempts * window_s:g} s on the console")
 
 
