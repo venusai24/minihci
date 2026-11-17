@@ -55,6 +55,20 @@ def summarise_probe(results: list[dict]) -> dict:
     return {r["q"]: "PASS" if r["ok"] else "FAIL" for r in results}
 
 
+def summarise_replicas(rows: list[dict]) -> dict:
+    """GET /vms/{id}/replicas rows -> per mode (full / incremental) count plus median and worst of
+    size_bytes and duration_ms. Only succeeded and pruned rows count (a pruned row was a good copy)."""
+    out: dict = {}
+    for mode in ("full", "incremental"):
+        sel = [r for r in rows if r.get("mode") == mode and r.get("status") in ("succeeded", "pruned")]
+        entry: dict = {"count": len(sel)}
+        for key in ("size_bytes", "duration_ms"):
+            s = summarize([r[key] for r in sel if r.get(key) is not None])
+            entry[key] = {"median": s["median"], "worst": s["worst"]}
+        out[mode] = entry
+    return out
+
+
 def _cell(v) -> str:
     return "-" if v is None else str(v)
 

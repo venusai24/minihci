@@ -11,7 +11,7 @@
 #
 # Required env: MINIHCI_REAL_HOSTS=1, FEDORA_IMAGE (path to Fedora cloud qcow2), SSH_PUBKEY (path)
 # Optional: NUM_HOSTS (3), NFS_DIR (/srv/minihci), HOST_NFS_MOUNT (/var/lib/minihci),
-#           HOST_MEM_MB (2560), HOST_VCPUS (2),
+#           HOST_DR_MOUNT (/srv/minihci/dr), HOST_MEM_MB (2560), HOST_VCPUS (2),
 #           HOST_DISK_DIR (/var/lib/libvirt/images), SSH_USER (root), LAPTOP_IP (192.168.122.1)
 set -euo pipefail
 
@@ -28,6 +28,7 @@ FEDORA_IMAGE="$(realpath "$FEDORA_IMAGE")"
 NUM_HOSTS="${NUM_HOSTS:-3}"
 NFS_DIR="${NFS_DIR:-/srv/minihci}"
 HOST_NFS_MOUNT="${HOST_NFS_MOUNT:-/var/lib/minihci}"
+HOST_DR_MOUNT="${HOST_DR_MOUNT:-/srv/minihci/dr}"
 HOST_MEM_MB="${HOST_MEM_MB:-2560}"
 HOST_VCPUS="${HOST_VCPUS:-2}"
 HOST_DISK_DIR="${HOST_DISK_DIR:-/var/lib/libvirt/images}"
@@ -174,6 +175,16 @@ host_nfs_mount() {
     rssh "$n" "mountpoint -q '$m' || timeout 60 mount '$m'"
 }
 
+# DR share (D-033): mounted at the SAME path as on the laptop, so MINIHCI_DR_ROOT is identical everywhere.
+# Appends only when no fstab entry uses the mount point, so a hand-made line is left alone.
+host_dr_mount() {
+    local n="$1" m="$HOST_DR_MOUNT"
+    local fstab="$LAPTOP_IP:$NFS_DIR/dr $m nfs4 vers=4.2,hard,_netdev 0 0"
+    rssh "$n" "mkdir -p '$m'"
+    rssh "$n" "awk -v m='$m' '\$2==m{f=1} END{exit !f}' /etc/fstab || echo '$fstab' >> /etc/fstab"
+    rssh "$n" "mountpoint -q '$m' || timeout 60 mount '$m'"
+}
+
 host_selinux() {
     local n="$1"
     if [ "$(rssh "$n" 'getsebool virt_use_nfs' | awk '{print $NF}')" != "on" ]; then
@@ -207,12 +218,14 @@ main() {
         host_dnf "$n"
         host_hostname "$n"
         host_nfs_mount "$n"
+        host_dr_mount "$n"
         host_selinux "$n"
         host_libvirtd "$n"
         host_firewall "$n"
         log "$(host_name "$n") ready"
     done
     log "done"
+    log "DR site: register the laptop as the DR host with: minihci hosts add laptop qemu:///system --site dr"
 }
 
 main "$@"

@@ -25,6 +25,7 @@ dev = [
     "pytest",
     "pytest-timeout",
     "httpx",
+    "pexpect",
     "ruff>=0.17.5",
 ]
 

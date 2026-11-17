@@ -170,7 +170,47 @@ The full reasoning is in [docs/decisions.md](docs/decisions.md). The ones that m
 - Removed hosts are soft-deleted (D-015).
 - Authentication is one optional shared bearer token (`MINIHCI_API_TOKEN`, D-032); there is no TLS and no multi-tenancy. Without the token the API is open, so keep it on a trusted network.
 - The dashboard (`ui/`) is not built yet.
-- Disaster recovery (a second datastore) is not built yet.
+- Disaster recovery is covered in the next section (M5), with its own limitations.
+
+## M5 DR replication
+
+**Topology.** The laptop is the control plane, the libvirtd at `qemu:///system`, and the NFS server
+(`/srv/minihci/primary`, `/srv/minihci/dr`). Hosts host1-3 are the primary site and mount primary at
+`/var/lib/minihci`. Everyone, including the hosts, mounts the DR share at the same path,
+`/srv/minihci/dr` (D-033), which `scripts/setup-hosts.sh` does idempotently. The laptop is registered as
+the DR host with `minihci hosts add laptop qemu:///system --site dr`; placement, migration, the
+rebalancer and HA never use a DR host.
+
+**Method.** Each protected VM gets a libvirt push backup (checkpoint plus `REUSE_EXTERNAL`) of its disk
+into a qcow2 chain on the DR share every `interval_s`: a full copy first, then increments, a new chain
+every `retention` replicas (D-034, D-035). Lag and achieved RPO are defined in D-036; the target is
+`interval_s + 30 s`.
+
+**Protect and fail over.**
+
+```
+minihci vms protect 1 --interval 60 --retention 3 --wait
+minihci vms protection 1
+minihci vms replicas 1
+minihci replication
+minihci vms failover 1 --wait          # needs the VM's host to be dead; --force overrides (D-037)
+```
+
+Owner scripts (they refuse to run without `MINIHCI_REAL_HOSTS`; read them first):
+`scripts/bench_dr.py` (sync size and time per round, `--api --vm --rounds --write-mib`) and
+`scripts/acceptance_m5.py` (destroys host1-3, fails over, measures lost writes; its last line says how
+to start the hosts again with `virsh -c qemu:///system start hostN`). Guests are CirrOS, reached over
+`virsh console` through pexpect (`scripts/guestlib.py`).
+
+**Known limitations** (D-033, D-037):
+
+- One machine and one NFS server simulate a site loss; this does not survive a real one.
+- The control plane is not replicated.
+- No failback and no reverse replication.
+- Writes after the last replica are lost by design.
+- A partitioned but alive primary can keep running its copy beside the DR copy.
+- Stopped VMs are not replicated; they keep their last replica and the lag grows.
+- Retention keeps at most `2*retention - 1` files per VM; deleting a VM leaves its replicas.
 
 ## Benchmarks
 
@@ -205,6 +245,16 @@ The restart did not fail; `create()` blocked until the dead host's NFS lease exp
 image lock was released. That wait is the disk fence described above, which is why the lease is
 set to 15 s. The 27.5 s with a 15 s lease is about 1.8 times the lease; the extra time is
 probably NFS client lock retry, but that is not verified.
+
+### DR replication
+
+| Measurement | Value | Method | Status |
+|---|---|---|---|
+| Full copy size | 50532352 bytes | `probe_dr.py Q3, CirrOS idle 60 s, n=1, preliminary` | preliminary |
+| Incremental size after 60 s idle | 724992 bytes | `probe_dr.py Q3, CirrOS idle 60 s, n=1, preliminary` | preliminary |
+| Sync time (full / incremental) | TBD | `bench_dr.py` (not run) | TBD |
+| Achieved RPO | TBD | `acceptance_m5.py` (not run) | TBD |
+| Failover time | TBD | `acceptance_m5.py` (not run) | TBD |
 
 ### Scripted benchmarks
 
