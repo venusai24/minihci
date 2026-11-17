@@ -213,6 +213,23 @@ def trim_checkpoints(ctx: StepContext) -> None:
     delete_minihci_checkpoints(ctx.driver, _uri(ctx, row.host_id), vm.name, keep=row.checkpoint)
 
 
+def _warn_undeletable(ctx: StepContext, rid: int, path: str | None, err: Exception) -> None:
+    ctx.log.warning(
+        "replica_file_delete_failed replica_id=%s path=%s: %s",
+        rid,
+        path,
+        err,
+        extra={
+            "fields": {
+                "event": "replica_file_delete_failed",
+                "vm_id": ctx.target_id,
+                "replica_id": rid,
+                "path": path,
+            }
+        },
+    )
+
+
 def sweep_dead_rows(ctx: StepContext) -> None:
     """Converge leftovers of attempts whose undo did not finish: files of `failed` rows, and of `running` rows whose
     task is no longer open. Never touches a running row whose task is still open."""
@@ -230,8 +247,12 @@ def sweep_dead_rows(ctx: StepContext) -> None:
             )
         ]
     for rid, status, path in dead:
-        if path and ctx.driver.disk_exists(path):
-            ctx.driver.delete_disk(path)
+        try:
+            if path and ctx.driver.disk_exists(path):
+                ctx.driver.delete_disk(path)
+        except DriverError as e:
+            _warn_undeletable(ctx, rid, path, e)
+            continue  # leave the row as it is; the next run retries
         if status == "running":
             with ctx.session_factory() as s, s.begin():
                 row = s.get(Replica, rid)
@@ -251,9 +272,19 @@ def prune(ctx: StepContext) -> None:
         retention = policy.retention if policy else 1
         infos = [_info(r) for r in _succeeded(s, ctx.target_id)]
     paths = {r.id: r.dr_path for r in infos}
+    chain = {r.id: (r.chain_id, r.seq) for r in infos}
+    stuck: dict[int, int] = {}  # chain_id -> seq of a row whose file could not be deleted
     for rid in prune_ids(infos, retention):
-        if ctx.driver.disk_exists(paths[rid]):
-            ctx.driver.delete_disk(paths[rid])
+        chain_id, seq = chain[rid]
+        if chain_id in stuck and seq < stuck[chain_id]:
+            continue  # never delete a backing file while a child that needs it still exists
+        try:
+            if ctx.driver.disk_exists(paths[rid]):
+                ctx.driver.delete_disk(paths[rid])
+        except DriverError as e:
+            stuck[chain_id] = seq
+            _warn_undeletable(ctx, rid, paths[rid], e)
+            continue
         with ctx.session_factory() as s, s.begin():
             s.get(Replica, rid).status = "pruned"
         ctx.log.info(

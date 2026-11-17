@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 
 from minihci.config import Settings
-from minihci.driver.base import DomainState
+from minihci.driver.base import DomainState, DriverError
 from minihci.driver.fake import FAKE_BLOCK_BYTES, FakeDriver
 from minihci.models import Host, ProtectionPolicy, Replica, Task, Vm
 from minihci.tasks.engine import enqueue
@@ -296,6 +296,69 @@ def test_undo_still_deletes_file_when_domain_parts_fail(session_factory, driver,
     driver.fail = {"delete_checkpoint": 5, "abort_backup": 5}
     vr.undo_backup(ctx)
     assert not driver.disk_exists(row.dr_path)
+
+
+def failing_delete(driver, monkeypatch, bad_paths):
+    real = driver.delete_disk
+
+    def delete_disk(path):
+        if path in bad_paths:
+            raise DriverError(f"cannot delete {path}")
+        real(path)
+
+    monkeypatch.setattr(driver, "delete_disk", delete_disk)
+
+
+def test_sweep_isolates_a_failing_dead_row(session_factory, driver, host_id, monkeypatch):
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    vm_id = make_vm(session_factory, driver, host_id)
+    protect(session_factory, vm_id, retention=1)
+    for i in range(3):  # chain_full every time with retention 1: rows 1,2 become prunable after the 3rd
+        driver.write_blocks(URI, "web1", [i])
+        if i < 2:
+            assert replicate(session_factory, driver, vm_id).state == "succeeded"
+    dead = []
+    for _ in range(2):  # two failed rows with files left behind
+        ctx = step_ctx(session_factory, driver, vm_id)
+        vr.plan(ctx)
+        row = rows(session_factory)[-1]
+        driver.create_blank_disk(row.dr_path, like=disk_path(session_factory, vm_id))
+        with session_factory() as s, s.begin():
+            s.get(Replica, row.id).status = "failed"
+            s.get(Task, ctx.task_id).state = "failed"  # keep drain() from picking the task up
+        dead.append(row)
+    old = [r for r in rows(session_factory) if r.status == "succeeded"]
+    failing_delete(driver, monkeypatch, {dead[0].dr_path})
+    assert replicate(session_factory, driver, vm_id).state == "succeeded"
+    by_id = {r.id: r for r in rows(session_factory)}
+    assert driver.disk_exists(dead[0].dr_path) and by_id[dead[0].id].status == "failed"
+    assert not driver.disk_exists(dead[1].dr_path)
+    assert by_id[old[0].id].status == "pruned" and not driver.disk_exists(old[0].dr_path)
+
+
+def test_retention_prune_isolates_a_failing_row(session_factory, driver, host_id, monkeypatch):
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    vm_id = make_vm(session_factory, driver, host_id)
+    protect(session_factory, vm_id, retention=1)
+    for i in range(3):
+        driver.write_blocks(URI, "web1", [i])
+        assert replicate(session_factory, driver, vm_id).state == "succeeded"
+    first, second, _third = rows(session_factory)
+    # retention 1: each run is a full replica in its own chain; third is kept, first two are doomed
+    with session_factory() as s, s.begin():
+        for r in (first, second):
+            s.get(Replica, r.id).status = "succeeded"
+    for r in (first, second):
+        driver.create_blank_disk(r.dr_path, like=disk_path(session_factory, vm_id))
+    failing_delete(driver, monkeypatch, {first.dr_path})
+    ctx = step_ctx(session_factory, driver, vm_id)
+    vr.plan(ctx)
+    vr.backup(ctx)
+    vr.record(ctx)
+    vr.prune(ctx)  # must not raise
+    by_id = {r.id: r for r in rows(session_factory)}
+    assert by_id[first.id].status == "succeeded" and driver.disk_exists(first.dr_path)
+    assert by_id[second.id].status == "pruned" and not driver.disk_exists(second.dr_path)
 
 
 def test_prune_sweeps_dead_rows_but_not_open_ones(session_factory, driver, vm, monkeypatch):
