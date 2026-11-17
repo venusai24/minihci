@@ -268,3 +268,75 @@ def test_migrate_replay_same_task(client, session_factory, driver, host_id, dst_
     assert b.json()["task_id"] == a.json()["task_id"]
     assert b.headers["Idempotent-Replayed"] == "true"
     assert _counts(session_factory)[1] == 1
+
+
+def test_list_vm_migrations(client, session_factory, driver, host_id):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import func, select
+
+    from minihci.models import Host, Migration, Task
+
+    vm = make_vm(session_factory, driver, host_id)
+    with session_factory() as s, s.begin():
+        h2 = Host(name="b", libvirt_uri="qemu+ssh://b/system", status="ready", cpu_total=8, mem_total_mb=16384)
+        s.add(h2)
+        t1 = Task(type="vm.migrate", target_id=vm, state="succeeded")
+        t2 = Task(type="vm.migrate", target_id=vm, state="failed")
+        s.add_all([t1, t2])
+        s.flush()
+        h2_id, t1_id, t2_id = h2.id, t1.id, t2.id
+        now = datetime.now(UTC)
+        s.add(
+            Migration(
+                task_id=t1_id,
+                vm_id=vm,
+                src_host_id=host_id,
+                dst_host_id=h2_id,
+                status="succeeded",
+                started_at=now - timedelta(minutes=5),
+                finished_at=now - timedelta(minutes=4),
+                duration_ms=1200,
+                downtime_ms=80,
+            )
+        )
+        s.add(
+            Migration(
+                task_id=t2_id,
+                vm_id=vm,
+                src_host_id=h2_id,
+                dst_host_id=host_id,
+                status="failed",
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        tasks_before = s.scalar(select(func.count()).select_from(Task))
+
+    r = client.get(f"/vms/{vm}/migrations")
+    assert r.status_code == 200
+    body = r.json()
+    assert [m["task_id"] for m in body] == [t2_id, t1_id]
+    assert body[1] == {
+        "task_id": t1_id,
+        "src_host_id": host_id,
+        "dst_host_id": h2_id,
+        "status": "succeeded",
+        "duration_ms": 1200,
+        "downtime_ms": 80,
+        "started_at": body[1]["started_at"],
+        "finished_at": body[1]["finished_at"],
+    }
+    assert body[0]["duration_ms"] is None and body[0]["status"] == "failed"
+    with session_factory() as s:
+        assert s.scalar(select(func.count()).select_from(Task)) == tasks_before
+
+
+def test_list_vm_migrations_unknown_vm_404(client):
+    assert client.get("/vms/9999/migrations").status_code == 404
+
+
+def test_list_vm_migrations_empty(client, session_factory, driver, host_id):
+    vm = make_vm(session_factory, driver, host_id)
+    r = client.get(f"/vms/{vm}/migrations")
+    assert r.status_code == 200 and r.json() == []

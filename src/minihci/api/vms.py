@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from minihci.api.deps import get_session
 from minihci.api.idempotency import fingerprint, run_idempotent
-from minihci.models import Host, Task, Vm
+from minihci.models import Host, Migration, Task, Vm
 from minihci.paths import resolve_image
 from minihci.scheduler.config import load_config
 from minihci.scheduler.placement import PLACEABLE_STATUSES, NoCapacity, fits, place
@@ -122,6 +122,28 @@ def get_vm(vm_id: int, session: Session = Depends(get_session)) -> dict[str, Any
     if vm is None:
         raise HTTPException(404, "vm not found")
     return _vm_out(vm)
+
+
+@router.get("/vms/{vm_id}/migrations")
+def list_vm_migrations(vm_id: int, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    if session.get(Vm, vm_id) is None:
+        raise HTTPException(404, "vm not found")
+    rows = session.scalars(
+        select(Migration).where(Migration.vm_id == vm_id).order_by(Migration.started_at.desc(), Migration.id.desc())
+    )
+    return [
+        {
+            "task_id": m.task_id,
+            "src_host_id": m.src_host_id,
+            "dst_host_id": m.dst_host_id,
+            "status": m.status,
+            "duration_ms": m.duration_ms,
+            "downtime_ms": m.downtime_ms,
+            "started_at": m.started_at.isoformat() if m.started_at else None,
+            "finished_at": m.finished_at.isoformat() if m.finished_at else None,
+        }
+        for m in rows
+    ]
 
 
 class StopIn(BaseModel):
