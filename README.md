@@ -280,7 +280,7 @@ probably NFS client lock retry, but that is not verified.
 | Incremental size after 60 s idle | 724992 bytes | `probe_dr.py Q3, CirrOS idle 60 s, n=1, preliminary` | preliminary |
 | Sync time, incremental, 8 MiB written per round (median / worst) | 553 ms / 564 ms (n=5) | `bench_dr.py --rounds 5`, `docs/benchmarks/dr-bench-2026-11-17.md` | preliminary |
 | Incremental size, 8 MiB written per round (median / worst) | 9179136 / 9310208 bytes (n=5) | `bench_dr.py --rounds 5`, `docs/benchmarks/dr-bench-2026-11-17.md` | preliminary |
-| Sync time, full copy | TBD (no full copy in the run) | `bench_dr.py` | TBD |
+| Sync time, full copy | 627 ms (50794496 bytes, n=1, first replica of a protected VM) | replica 79 of VM 5, `minihci vms replicas 5`, `duration_ms` | preliminary |
 | Achieved RPO | TBD | `acceptance_m5.py` (not run; `within_target` ignores backup duration, see M5 limitations) | TBD |
 | Data loss, API `data_loss_s` (lower bound, control-plane clock) | 60.4 s, within the 90 s target (interval 60 s + 30 s slack) | failover task 114, read from `minihci vms failovers 1`, n=1 | preliminary |
 | Failover time | 2662 ms | failover task 114, `failover_ms` from `minihci vms failovers 1`, n=1 | preliminary |
