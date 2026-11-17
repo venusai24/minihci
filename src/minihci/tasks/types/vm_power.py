@@ -26,7 +26,12 @@ def _ensure_started(ctx: StepContext) -> None:
     state = ctx.driver.domain_state(uri, name)
     if state is None:
         raise RuntimeError("domain not defined")
-    if state != DomainState.RUNNING:
+    if state == DomainState.PAUSED:
+        ctx.driver.resume_domain(uri, name)  # a paused guest keeps its memory; start would fail on it
+    elif state == DomainState.CRASHED:
+        ctx.driver.destroy_domain(uri, name)  # still active: stop it, then boot it again
+        ctx.driver.start_domain(uri, name)
+    elif state != DomainState.RUNNING:
         ctx.driver.start_domain(uri, name)
 
 

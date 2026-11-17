@@ -117,3 +117,31 @@ def test_fake_driver_paused_is_active():
         d.undefine_domain(U1, "vm1")
     d.destroy_domain(U1, "vm1")
     assert d.domain_state(U1, "vm1") == DomainState.SHUT_OFF
+
+
+def test_libvirt_resume_paused_domain(drv, stub_libvirt):
+    _set(stub_libvirt, 3, 1)
+    drv.resume_domain(U1, "vm1")
+    assert drv.domain_status(U1, "vm1") == DomainStatus(DomainState.RUNNING, None)
+
+
+def test_libvirt_resume_errors(drv, stub_libvirt):
+    from minihci.driver.base import DomainNotFound, DriverError
+
+    with pytest.raises(DriverError):  # shut off, not paused
+        drv.resume_domain(U1, "vm1")
+    with pytest.raises(DomainNotFound):
+        drv.resume_domain(U1, "ghost")
+
+
+def test_fake_resume():
+    from minihci.driver.base import DriverError
+
+    d = FakeDriver()
+    d.add_host(U1, cpu_total=4, mem_total_mb=4096)
+    d.define_domain(U1, SPEC)
+    with pytest.raises(DriverError):
+        d.resume_domain(U1, "vm1")
+    d.set_domain_state(U1, "vm1", DomainState.PAUSED, "user")
+    d.resume_domain(U1, "vm1")
+    assert d.domain_status(U1, "vm1") == DomainStatus(DomainState.RUNNING, None)

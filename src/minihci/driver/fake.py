@@ -220,6 +220,15 @@ class FakeDriver:
 
         self._call("shutdown_domain", fn)
 
+    def resume_domain(self, uri: str, name: str) -> None:
+        def fn(state: dict[str, Any]) -> None:
+            d = self._domain(state, uri, name)
+            if d["state"] != DomainState.PAUSED.value:
+                raise DriverError(f"domain not paused: {name}")
+            d["state"], d["reason"] = DomainState.RUNNING.value, None
+
+        self._call("resume_domain", fn)
+
     def reboot_domain(self, uri: str, name: str) -> None:
         def fn(state: dict[str, Any]) -> None:
             d = self._domain(state, uri, name)

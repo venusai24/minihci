@@ -15,7 +15,8 @@ from minihci.tasks.locks import LOCK_NAMESPACE
 
 log = logging.getLogger("minihci.failover")
 
-RESTARTABLE = ("running", "pending_restart")
+# paused and crashed guests died with their host just the same (D-026 amendment 4)
+RESTARTABLE = ("running", "pending_restart", "paused", "crashed")
 
 
 def _candidates(session_factory: sessionmaker[Session]) -> list[int]:

@@ -193,3 +193,13 @@ def test_heartbeat_run_forever_calls_failover(monkeypatch):
     stop.set()
     th.join(1)
     assert len(calls) >= 2
+
+
+@pytest.mark.parametrize("st,why", [("paused", "ioerror"), ("paused", "user"), ("crashed", "panicked")])
+def test_paused_and_crashed_vms_of_a_dead_host_are_restarted_too(session_factory, driver, ha, st, why):
+    add_ready_host(session_factory, driver, name="b", uri=URI_B)
+    v = make_vm(session_factory, driver, ha, name="v1")
+    set_vm(session_factory, v, actual_state=st, state_reason=why)
+    set_host(session_factory, ha, "dead")
+    failover_once(session_factory, S)
+    assert [t.target_id for t in tasks(session_factory)] == [v]

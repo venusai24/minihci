@@ -169,11 +169,28 @@ def test_stop_destroys_a_paused_vm_and_clears_the_reason(session_factory, driver
         assert (row.actual_state, row.state_reason) == ("stopped", None)
 
 
-def test_start_on_a_paused_vm_fails_and_records_paused_not_running(session_factory, driver, host_id):
+def test_start_resumes_a_paused_vm(session_factory, driver, host_id):
     vm = make_vm(session_factory, driver, host_id)
     driver.set_domain_state(URI, "web1", DomainState.PAUSED, "user")
+    with session_factory() as s, s.begin():
+        row = s.get(Vm, vm)
+        row.actual_state, row.state_reason = "paused", "user"
+    boots = driver.boot_count(URI, "web1")
     t = run(session_factory, driver, "start", vm)
-    assert t.state != "succeeded"
+    assert t.state == "succeeded"
+    assert driver.domain_status(URI, "web1").state == DomainState.RUNNING
+    assert driver.boot_count(URI, "web1") == boots  # resumed, not rebooted
     with session_factory() as s:
         row = s.get(Vm, vm)
-        assert (row.actual_state, row.state_reason) == ("paused", "user")
+        assert (row.actual_state, row.state_reason) == ("running", None)
+
+
+def test_start_restarts_a_crashed_vm(session_factory, driver, host_id):
+    vm = make_vm(session_factory, driver, host_id)
+    driver.set_domain_state(URI, "web1", DomainState.CRASHED, "panicked")
+    boots = driver.boot_count(URI, "web1")
+    t = run(session_factory, driver, "start", vm)
+    assert t.state == "succeeded"
+    assert driver.domain_state(URI, "web1") == DomainState.RUNNING
+    assert driver.boot_count(URI, "web1") == boots + 1  # destroyed, then booted again
+    assert actual(session_factory, vm) == "running"

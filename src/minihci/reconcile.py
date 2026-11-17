@@ -13,7 +13,7 @@ from minihci.logging import task_context
 from minihci.models import Host, Task, Vm
 from minihci.tasks.engine import enqueue
 from minihci.tasks.locks import LOCK_NAMESPACE
-from minihci.vmstate import DB_STATE, WEDGED, apply_status, keeps_reason, observed_state
+from minihci.vmstate import DB_STATE, WEDGED, apply_status, keeps_reason, observed_state, recoverable
 
 log = logging.getLogger("minihci.reconcile")
 
@@ -117,8 +117,8 @@ def _reconcile_vm(session_factory, driver, host_id: int, uri: str, vm_id: int, r
             report.unhealthy.append(vm_id)
         if status is None or observed == vm.desired_state:
             return
-        if observed in WEDGED and vm.desired_state == "running":
-            return  # start cannot revive a paused or crashed domain; an operator has to look (see vm_unhealthy)
+        if observed in WEDGED and vm.desired_state == "running" and not recoverable(observed, reason):
+            return  # not ours to undo (ioerror, migration, watchdog, ...): see the vm_unhealthy log and metric
         # D-019: never act directly; enqueue in this txn, under the VM lock, so passes cannot duplicate it
         ttype, params = ("vm.start", {}) if vm.desired_state == "running" else ("vm.stop", {"force": False})
         task = enqueue(s, ttype, vm_id, params)

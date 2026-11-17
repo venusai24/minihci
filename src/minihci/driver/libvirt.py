@@ -357,6 +357,10 @@ class LibvirtDriver:
         with self._op(uri) as conn:
             self._lookup(conn, name).create()
 
+    def resume_domain(self, uri: str, name: str) -> None:
+        with self._op(uri) as conn:
+            self._lookup(conn, name).resume()
+
     def destroy_domain(self, uri: str, name: str) -> None:
         with self._op(uri) as conn:
             self._lookup(conn, name).destroy()

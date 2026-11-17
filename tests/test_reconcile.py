@@ -337,7 +337,7 @@ def reason_of(session_factory, vm_id):
         return s.get(Vm, vm_id).state_reason
 
 
-def test_paused_ioerror_is_recorded_unhealthy_and_gets_no_start(session_factory, driver, host_id, logbuf):
+def test_paused_ioerror_is_recorded_unhealthy_and_never_auto_resumed(session_factory, driver, host_id, logbuf):
     from minihci.driver.base import DomainState
 
     vm_id = create_vm(session_factory, driver, host_id)
@@ -353,21 +353,35 @@ def test_paused_ioerror_is_recorded_unhealthy_and_gets_no_start(session_factory,
     assert len([e for e in events(logbuf) if e["event"] == "vm_unhealthy"]) == 1
 
 
-def test_paused_by_user_is_recorded_but_not_unhealthy(session_factory, driver, host_id):
+def test_paused_by_user_is_recorded_not_unhealthy_and_resumed(session_factory, driver, host_id):
     from minihci.driver.base import DomainState
 
     vm_id = create_vm(session_factory, driver, host_id)
     driver.set_domain_state(URI, "web1", DomainState.PAUSED, "user")
     report = run(session_factory, driver)
     assert actual(session_factory, vm_id) == "paused" and reason_of(session_factory, vm_id) == "user"
-    assert report.unhealthy == [] and report.corrective == []
+    assert report.unhealthy == []
+    assert len(report.corrective) == 1 and tasks_of(session_factory) == [("vm.start", vm_id, {})]  # resumed
+    drain(session_factory, driver)
+    assert actual(session_factory, vm_id) == "running" and reason_of(session_factory, vm_id) is None
+
+
+@pytest.mark.parametrize("why", ["migration", "save", "dump", "snapshot", "shutting_down", "starting_up", "watchdog"])
+def test_paused_for_other_reasons_is_left_alone(session_factory, driver, host_id, why):
+    from minihci.driver.base import DomainState
+
+    vm_id = create_vm(session_factory, driver, host_id)
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, why)
+    report = run(session_factory, driver)
+    assert actual(session_factory, vm_id) == "paused" and reason_of(session_factory, vm_id) == why
+    assert report.corrective == [] and report.unhealthy == []
 
 
 def test_reason_change_while_paused_is_drift(session_factory, driver, host_id):
     from minihci.driver.base import DomainState
 
     vm_id = create_vm(session_factory, driver, host_id)
-    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "user")
+    driver.set_domain_state(URI, "web1", DomainState.PAUSED, "watchdog")
     run(session_factory, driver)
     driver.set_domain_state(URI, "web1", DomainState.PAUSED, "ioerror")
     report = run(session_factory, driver)
@@ -375,14 +389,17 @@ def test_reason_change_while_paused_is_drift(session_factory, driver, host_id):
     assert reason_of(session_factory, vm_id) == "ioerror"
 
 
-def test_crashed_is_recorded_with_reason_and_not_restarted(session_factory, driver, host_id):
+def test_crashed_is_recorded_with_reason_and_restarted(session_factory, driver, host_id):
     from minihci.driver.base import DomainState
 
     vm_id = create_vm(session_factory, driver, host_id)
     driver.set_domain_state(URI, "web1", DomainState.CRASHED, "panicked")
     report = run(session_factory, driver)
     assert actual(session_factory, vm_id) == "crashed" and reason_of(session_factory, vm_id) == "panicked"
-    assert report.corrective == []
+    assert len(report.corrective) == 1 and tasks_of(session_factory) == [("vm.start", vm_id, {})]
+    drain(session_factory, driver)
+    assert driver.domain_state(URI, "web1") == DomainState.RUNNING
+    assert actual(session_factory, vm_id) == "running" and reason_of(session_factory, vm_id) is None
 
 
 def test_reason_is_cleared_when_the_vm_recovers(session_factory, driver, host_id):

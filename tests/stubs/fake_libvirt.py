@@ -209,6 +209,12 @@ class FakeDomain:
     def shutdown(self):
         self._stop("shutdown")
 
+    def resume(self):
+        self._check("resume")
+        if self.state_ != CONSTS["VIR_DOMAIN_PAUSED"]:
+            raise _err("VIR_ERR_OPERATION_INVALID", "domain is not paused")
+        self.state_, self.reason_ = RUNNING, 1
+
     def reboot(self, flags=0):
         self._check("reboot")
         if self.state_ != RUNNING:

@@ -28,5 +28,18 @@ def apply_status(vm: Vm, status: DomainStatus | None) -> None:
     vm.state_reason = status.reason if status is not None and keeps_reason(vm.actual_state) else None
 
 
+# Paused reasons the reconciler undoes by itself. Everything else is either a step of something still in
+# progress (migration, save, dump, snapshot, starting up, shutting down), a guest that hung (watchdog), or
+# needs an operator (ioerror), so resuming it would be wrong.
+AUTO_RESUME_REASONS = ("user",)
+
+
+def recoverable(actual_state: str, state_reason: str | None) -> bool:
+    """Can `vm.start` bring a paused or crashed VM back without making things worse?"""
+    if actual_state == "crashed":
+        return True
+    return actual_state == "paused" and state_reason in AUTO_RESUME_REASONS
+
+
 def is_unhealthy(actual_state: str, state_reason: str | None) -> bool:
     return actual_state == "paused" and state_reason == "ioerror"

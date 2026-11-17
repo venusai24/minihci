@@ -462,10 +462,18 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
   `vm.start` for a paused or crashed VM (start cannot revive it), but it does enqueue `vm.stop` when the VM
   should be stopped; `vm.stop` destroys a non-running active domain instead of asking it to shut down;
   `vm.delete`, the create/HA undo steps, `host.reclaim` and the HA fence treat any active state (running,
-  paused, crashed) as "must be destroyed first" and as "a second copy could exist". Not done: nothing
-  resumes or restarts a paused/crashed VM automatically, and HA does not restart paused or crashed VMs from a
-  dead host (`RESTARTABLE` is unchanged). Undo: map paused to RUNNING and crashed to SHUT_OFF in
-  `map_domain_state`, and drop the migration.
+  paused, crashed) as "must be destroyed first" and as "a second copy could exist".
+  Recovery (added the same day at the owner's request): `HostDriver.resume_domain` is new, and `vm.start` now
+  resumes a PAUSED domain and destroys then starts a CRASHED one (each step checks the state first, so it is
+  retry-safe). The reconciler enqueues `vm.start` for a desired-running VM that is crashed, or paused with
+  reason `user`. It leaves alone a pause whose reason is `ioerror` (a disk fault: an operator has to look; this
+  is the unhealthy case), `migration`, `save`, `dump`, `snapshot`, `starting_up`, `shutting_down` (in
+  progress) and `watchdog` (the guest hung; resuming does nothing). A VM with an open `vm.*` task is still
+  skipped, so an in-flight migration is never resumed under its own feet. HA: `RESTARTABLE` now includes
+  `paused` and `crashed`, so those VMs fail over when their host dies. Known limit: a guest that keeps
+  crashing is restarted on every reconcile pass (as a shut-off one already was); there is no back-off.
+  Undo: map paused to RUNNING and crashed to SHUT_OFF in `map_domain_state`, empty `AUTO_RESUME_REASONS`,
+  and drop the migration.
 
 ## D-027 Heartbeats: timings, `ready` is "up", dead measured from the last good heartbeat
 - **Context:** FR-4.1 wants `up -> suspect -> dead` from missed heartbeats. The PRD gives no exact numbers, and the existing host status for a healthy host is `ready`. The Q10 probes measured: a long-off host fails a connect in ~3 s, a just-died host hangs, an open connection's keepalive breaks in ~6 s.
