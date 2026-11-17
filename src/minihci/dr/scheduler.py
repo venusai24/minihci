@@ -41,7 +41,7 @@ def _handle(session_factory: sessionmaker[Session], vm_id: int, settings: Settin
             return None
         policy = s.get(ProtectionPolicy, vm_id)
         host = s.get(Host, vm.host_id)
-        if policy is None or not policy.enabled or host.status != "ready" or host.site != "primary":
+        if policy is None or host is None or not policy.enabled or host.status != "ready" or host.site != "primary":
             return None
         open_task = s.scalars(
             select(Task.id).where(
@@ -77,7 +77,12 @@ def replicate_once(
     now = now or datetime.now(UTC)
     ids = []
     for vm_id in _candidates(session_factory):
-        task_id = _handle(session_factory, vm_id, settings, now)
+        try:
+            # the per-VM transaction is closed by _handle's context managers, so a failure releases the row lock
+            task_id = _handle(session_factory, vm_id, settings, now)
+        except Exception:
+            log.exception("replication check failed", extra={"fields": {"event": "replicate_failed", "vm_id": vm_id}})
+            continue
         if task_id is not None:
             ids.append(task_id)
     return ids

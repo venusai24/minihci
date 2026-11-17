@@ -184,3 +184,37 @@ def test_run_forever_survives_exception(session_factory, monkeypatch):
     monkeypatch.setattr(sch, "replicate_once", boom)
     run_forever(stop, session_factory, Settings(replication_tick_s=0.01))
     assert len(calls) == 2
+
+
+def test_exception_in_one_vm_does_not_starve_others(session_factory, driver, host, monkeypatch, caplog):
+    import minihci.dr.scheduler as sch
+
+    v1 = protected(session_factory, driver, host, name="v1")
+    v2 = protected(session_factory, driver, host, name="v2")
+    v3 = protected(session_factory, driver, host, name="v3")
+    real = sch._handle
+
+    def flaky(sf, vm_id, settings, now):
+        if vm_id == v1:
+            raise RuntimeError("boom")
+        return real(sf, vm_id, settings, now)
+
+    monkeypatch.setattr(sch, "_handle", flaky)
+    ids = replicate_once(session_factory, S, NOW)
+    assert len(ids) == 2
+    assert sorted(t.target_id for t in pending(session_factory)) == [v2, v3]
+    assert any(getattr(r, "fields", {}).get("vm_id") == v1 for r in caplog.records)
+
+
+def test_missing_host_row_is_not_due(session_factory, driver, host, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    protected(session_factory, driver, host)
+    real_get = Session.get
+
+    def get(self, entity, ident, *a, **k):
+        return None if entity is Host else real_get(self, entity, ident, *a, **k)
+
+    monkeypatch.setattr(Session, "get", get)
+    assert replicate_once(session_factory, S, NOW) == []
+    assert pending(session_factory) == []
