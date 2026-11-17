@@ -23,6 +23,7 @@ app.add_typer(tasks_app, name="tasks")
 class Ctx:
     api: str
     json: bool
+    token: str | None = None
 
 
 def make_client(api: str) -> httpx.Client:
@@ -35,8 +36,9 @@ def main(
     ctx: typer.Context,
     api: str = typer.Option(DEFAULT_API, "--api", envvar="MINIHCI_API", help="API base URL"),
     json: bool = typer.Option(False, "--json", help="Print the API JSON unchanged"),
+    token: str | None = typer.Option(None, "--token", envvar="MINIHCI_API_TOKEN", help="API bearer token"),
 ) -> None:
-    ctx.obj = Ctx(api=api, json=json)
+    ctx.obj = Ctx(api=api, json=json, token=token or None)
 
 
 def _fail(msg: str, code: int) -> None:
@@ -48,6 +50,8 @@ def request(ctx: typer.Context, method: str, path: str, **kw: Any) -> Any:
     """Call the API and map errors to D-029 exit codes. Returns the decoded JSON body."""
     c: Ctx = ctx.obj
     try:
+        if c.token:
+            kw["headers"] = {**kw.get("headers", {}), "Authorization": f"Bearer {c.token}"}
         with make_client(c.api) as client:
             resp = client.request(method, path, **kw)
     except httpx.HTTPError as e:

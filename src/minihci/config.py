@@ -9,6 +9,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://minihci:minihci@localhost:5433/minihci"
     driver: Literal["fake", "libvirt"] = "fake"
+    api_token: str | None = None  # set it to require "Authorization: Bearer <token>" on every API route
     storage_root: str = "/srv/minihci/images"
     image_root: str = "/srv/minihci/base"
     libvirt_storage_uris: list[str] = []  # D-026: hosts tried in order for disk operations

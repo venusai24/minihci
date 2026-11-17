@@ -160,7 +160,7 @@ The full reasoning is in [docs/decisions.md](docs/decisions.md). The ones that m
   storage is copied (D-024, D-026).
 - A VM deleted outside MiniHCI is marked `missing`, not re-created (D-020).
 - Removed hosts are soft-deleted (D-015).
-- No authentication, no TLS, no multi-tenancy.
+- Authentication is one optional shared bearer token (`MINIHCI_API_TOKEN`, D-032); there is no TLS and no multi-tenancy. Without the token the API is open, so keep it on a trusted network.
 - The dashboard (`ui/`) is not built yet.
 - Disaster recovery (a second datastore) is not built yet.
 

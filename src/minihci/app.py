@@ -3,11 +3,12 @@ import sys
 import time
 from typing import TextIO
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import sessionmaker
 
 from minihci.api import hosts, metrics, scheduler, tasks, vms
+from minihci.api.deps import require_token
 from minihci.api.idempotency import IdempotencyConflict, InvalidIdempotencyKey
 from minihci.config import Settings
 from minihci.db import make_engine, make_session_factory
@@ -40,11 +41,12 @@ def create_app(
         )
         return response
 
-    app.include_router(hosts.router)
-    app.include_router(tasks.router)
-    app.include_router(vms.router)
-    app.include_router(metrics.router)
-    app.include_router(scheduler.router)
+    auth = [Depends(require_token)]
+    app.include_router(hosts.router, dependencies=auth)
+    app.include_router(tasks.router, dependencies=auth)
+    app.include_router(vms.router, dependencies=auth)
+    app.include_router(metrics.router, dependencies=auth)
+    app.include_router(scheduler.router, dependencies=auth)
 
     @app.exception_handler(IdempotencyConflict)
     def _conflict(_: Request, exc: IdempotencyConflict) -> JSONResponse:
