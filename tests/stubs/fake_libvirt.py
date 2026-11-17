@@ -6,6 +6,8 @@ sys.modules['libvirt'] and yields it. Test controls live on the module object:
                                 hangs/fail dicts keyed by op name)
   lib.hang(uri, op="open")   -> threading.Event; the op blocks until .set()
   lib.event_loop_registered  -> set by virEventRegisterDefaultImpl()
+  dom.backup_outcome / dom.backup_polls -> "completed" | "failed" | "hang"; jobInfo() polls before it ends
+  host.backups / host.undefine_flags -> recorded backupBegin / undefineFlags calls
   conn.simulate_close(reason) -> marks the conn dead and fires close callbacks
   lib.open_calls             -> list of uris opened
 Pools cache their volume list: only pool.refresh(0) syncs it from host.storage
@@ -34,6 +36,7 @@ ERR = {
     "VIR_ERR_OPERATION_FAILED": 68,
     "VIR_ERR_OPERATION_INVALID": 55,
     "VIR_ERR_DOM_EXIST": 76,
+    "VIR_ERR_NO_DOMAIN_CHECKPOINT": 103,
 }
 CONSTS = {
     "VIR_DOMAIN_NOSTATE": 0,
@@ -49,6 +52,16 @@ CONSTS = {
     "VIR_MIGRATE_PERSIST_DEST": 8,
     "VIR_MIGRATE_UNDEFINE_SOURCE": 16,
     "VIR_DOMAIN_JOB_STATS_COMPLETED": 1,
+    "VIR_DOMAIN_JOB_STATS_KEEP_COMPLETED": 4,
+    "VIR_DOMAIN_JOB_NONE": 0,
+    "VIR_DOMAIN_JOB_BOUNDED": 1,
+    "VIR_DOMAIN_JOB_UNBOUNDED": 2,
+    "VIR_DOMAIN_JOB_COMPLETED": 3,
+    "VIR_DOMAIN_JOB_FAILED": 4,
+    "VIR_DOMAIN_JOB_CANCELLED": 5,
+    "VIR_DOMAIN_JOB_OPERATION_BACKUP": 9,
+    "VIR_DOMAIN_BACKUP_BEGIN_REUSE_EXTERNAL": 1,
+    "VIR_DOMAIN_UNDEFINE_CHECKPOINTS_METADATA": 16,
     "VIR_NODE_CPU_STATS_ALL_CPUS": -1,
     "VIR_NODE_MEMORY_STATS_ALL_CELLS": -1,
     "VIR_CONNECT_CLOSE_REASON_ERROR": 0,
@@ -80,12 +93,13 @@ class FakeVolume:
     def __init__(self, pool, name, path, capacity, backing=None, backing_format="qcow2"):
         self.pool, self._name, self.path = pool, name, path
         self.capacity, self.backing, self.backing_format = capacity, backing, backing_format
+        self.allocation = 0
 
     def name(self):
         return self._name
 
     def info(self):  # [type, capacity, allocation]
-        return [0, self.capacity, 0]
+        return [0, self.capacity, self.allocation]
 
     def XMLDesc(self, flags=0):
         bs = ""
@@ -157,6 +171,23 @@ class FakePool:
         raise _err("VIR_ERR_NO_STORAGE_VOL", f"no volume {name}")
 
 
+class FakeCheckpoint:
+    def __init__(self, dom, name, ctime):
+        self.dom, self._name, self.ctime = dom, name, ctime
+
+    def name(self):
+        return self._name
+
+    def getXMLDesc(self, flags=0):
+        return (
+            f"<domaincheckpoint><name>{self._name}</name><creationTime>{self.ctime}</creationTime></domaincheckpoint>"
+        )
+
+    def delete(self, flags=0):
+        self.dom._check("checkpointDelete")
+        self.dom.checkpoints.pop(self._name, None)
+
+
 class FakeDomain:
     def __init__(self, host, xml):
         self.host = host
@@ -167,6 +198,12 @@ class FakeDomain:
         self.persistent = True
         self.defined = True
         self.job_stats: dict[str, int] | Exception = {"downtime": 90, "time_elapsed": 400}
+        self.checkpoints: dict[str, FakeCheckpoint] = {}
+        self.backup_outcome = "completed"  # or "failed" / "hang" (never finishes)
+        self.backup_polls = 1  # jobInfo() calls that still report the job before it ends
+        self.backup_job: dict | None = None
+        self.completed_job: dict | None = None
+        self._ctime = 0
 
     def _check(self, op):
         self.host.hook(op)
@@ -225,6 +262,68 @@ class FakeDomain:
         self.host.domains.pop(self._name, None)
         self.defined = False
 
+    def undefineFlags(self, flags=0):
+        self.host.undefine_flags.append(flags)
+        self.undefine()
+        self.checkpoints.clear()
+
+    def listAllCheckpoints(self, flags=0):
+        self._check("listAllCheckpoints")
+        return list(reversed(list(self.checkpoints.values())))  # deliberately not creation order
+
+    def checkpointLookupByName(self, name, flags=0):
+        self._check("checkpointLookup")
+        cp = self.checkpoints.get(name)
+        if cp is None:
+            raise _err("VIR_ERR_NO_DOMAIN_CHECKPOINT", f"no domain checkpoint with matching name '{name}'")
+        return cp
+
+    def backupBegin(self, backup_xml, checkpoint_xml, flags=0):
+        self._check("backupBegin")
+        if self.state_ != RUNNING:
+            raise _err("VIR_ERR_OPERATION_INVALID", "domain is not running")
+        if self.backup_job is not None:
+            raise _err("VIR_ERR_OPERATION_INVALID", "another job is active")
+        broot = ET.fromstring(backup_xml)
+        since = broot.findtext("incremental")
+        if since is not None and since not in self.checkpoints:
+            raise _err("VIR_ERR_NO_DOMAIN_CHECKPOINT", f"no domain checkpoint with matching name '{since}'")
+        cname = ET.fromstring(checkpoint_xml).findtext("name")
+        if cname in self.checkpoints:
+            raise _err("VIR_ERR_OPERATION_INVALID", f"checkpoint {cname} already exists")
+        target = broot.find("disks/disk/target").get("file")
+        self.host.backups.append({"target": target, "since": since, "checkpoint": cname, "flags": flags})
+        self._ctime += 1
+        self.checkpoints[cname] = FakeCheckpoint(self, cname, self._ctime)
+        self.backup_job = {"polls": self.backup_polls}
+        self.completed_job = None
+
+    def jobInfo(self):
+        self._check("jobInfo")
+        job = self.backup_job
+        if job is None:
+            return [CONSTS["VIR_DOMAIN_JOB_NONE"], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        if self.backup_outcome != "hang":
+            if job["polls"] > 0:
+                job["polls"] -= 1
+            else:
+                ok = self.backup_outcome == "completed"
+                self.backup_job = None
+                kind = "VIR_DOMAIN_JOB_COMPLETED" if ok else "VIR_DOMAIN_JOB_FAILED"
+                self.completed_job = {"type": CONSTS[kind], "operation": CONSTS["VIR_DOMAIN_JOB_OPERATION_BACKUP"]}
+                return [CONSTS["VIR_DOMAIN_JOB_NONE"], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        return [CONSTS["VIR_DOMAIN_JOB_UNBOUNDED"], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    def abortJob(self):
+        self._check("abortJob")
+        if self.backup_job is None:
+            raise _err("VIR_ERR_OPERATION_INVALID", "no job is active on the domain")
+        self.backup_job = None
+        self.completed_job = {
+            "type": CONSTS["VIR_DOMAIN_JOB_CANCELLED"],
+            "operation": CONSTS["VIR_DOMAIN_JOB_OPERATION_BACKUP"],
+        }
+
     def migrate3(self, dst_conn, params, flags):
         self._check("migrate")
         dst_conn._check()
@@ -250,6 +349,13 @@ class FakeDomain:
     def jobStats(self, flags=0):
         # Like real libvirt: raises on the (undefined) source domain, works on the returned destination one.
         self._check("jobStats")
+        if self.backup_job is not None:
+            return {"type": CONSTS["VIR_DOMAIN_JOB_UNBOUNDED"], "operation": CONSTS["VIR_DOMAIN_JOB_OPERATION_BACKUP"]}
+        if self.completed_job is not None and flags & CONSTS["VIR_DOMAIN_JOB_STATS_COMPLETED"]:
+            out = dict(self.completed_job)
+            if not flags & CONSTS["VIR_DOMAIN_JOB_STATS_KEEP_COMPLETED"]:
+                self.completed_job = None
+            return out
         if isinstance(self.job_stats, Exception):
             raise self.job_stats
         return dict(self.job_stats)
@@ -266,6 +372,8 @@ class FakeHost:
         self.mem = {"total": 2_000_000, "free": 500_000, "buffers": 100_000, "cached": 400_000}  # KiB
         self.info = ["x86_64", 2456, 2, 2400, 1, 1, 2, 1]
         self.migrations: list[tuple] = []
+        self.backups: list[dict] = []
+        self.undefine_flags: list[int] = []
         self.hangs: dict[str, threading.Event] = {}
         self.fail: dict[str, Exception] = {}  # op -> exception raised on every call while set
         self.conns: list[FakeConn] = []

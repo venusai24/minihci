@@ -20,5 +20,7 @@ def build_driver(settings: Settings) -> HostDriver:
             storage_timeout_s=settings.libvirt_storage_timeout_s,
             image_root=settings.image_root,
             storage_root=settings.storage_root,
+            dr_root=settings.dr_root,
+            backup_timeout_s=settings.backup_timeout_s,
         )
     raise NotImplementedError(f"driver not implemented: {settings.driver}")

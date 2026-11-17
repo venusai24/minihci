@@ -46,3 +46,29 @@ def dir_pool_xml(name: str, path: str) -> str:
   <name>{escape(name)}</name>
   <target><path>{escape(path)}</path></target>
 </pool>"""
+
+
+def backup_xml(target_path: str, since: str | None) -> str:
+    inc = f"\n  <incremental>{escape(since)}</incremental>" if since is not None else ""
+    return f"""<domainbackup mode='push'>{inc}
+  <disks>
+    <disk name='vda' backup='yes' type='file'>
+      <driver type='qcow2'/>
+      <target file='{_attr(target_path)}'/>
+    </disk>
+  </disks>
+</domainbackup>"""
+
+
+def checkpoint_xml(name: str) -> str:
+    return f"""<domaincheckpoint>
+  <name>{escape(name)}</name>
+</domaincheckpoint>"""
+
+
+def blank_volume_xml(name: str, capacity: int) -> str:
+    return f"""<volume>
+  <name>{escape(name)}</name>
+  <capacity unit='bytes'>{int(capacity)}</capacity>
+  <target><format type='qcow2'/></target>
+</volume>"""

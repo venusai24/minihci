@@ -17,6 +17,8 @@ from types import ModuleType
 from typing import TypeVar
 
 from minihci.driver.base import (
+    BackupResult,
+    CheckpointNotFound,
     DomainExists,
     DomainNotFound,
     DomainSpec,
@@ -31,7 +33,14 @@ from minihci.driver.base import (
 from minihci.driver.libvirt_errors import load_libvirt, map_error
 from minihci.driver.libvirt_stats import cpu_pct, map_domain_state, mem_used_mb, migration_result
 from minihci.driver.libvirt_stats import domain_status as status_from_libvirt
-from minihci.driver.libvirt_xml import dir_pool_xml, domain_xml, overlay_volume_xml
+from minihci.driver.libvirt_xml import (
+    backup_xml,
+    blank_volume_xml,
+    checkpoint_xml,
+    dir_pool_xml,
+    domain_xml,
+    overlay_volume_xml,
+)
 from minihci.paths import resolve_image
 
 log = logging.getLogger(__name__)
@@ -233,6 +242,9 @@ class LibvirtDriver:
 
     IMAGES_POOL = "minihci-images"
     VMS_POOL = "minihci-vms"
+    DR_POOL = "minihci-dr"
+
+    BACKUP_POLL_S = 0.5
 
     FIRST_SAMPLE_GAP_S = 0.5
 
@@ -244,7 +256,11 @@ class LibvirtDriver:
         image_root: str = "/srv/minihci/base",
         storage_root: str = "/srv/minihci/images",
         storage_timeout_s: float = 30,
+        dr_root: str = "/srv/minihci/dr",
+        backup_timeout_s: float = 1800,
     ) -> None:
+        self._dr_root = dr_root
+        self._backup_timeout_s = backup_timeout_s
         self._storage_uris = list(storage_uris or [])
         self._storage_timeout_s = storage_timeout_s
         self._image_root = image_root
@@ -346,11 +362,16 @@ class LibvirtDriver:
             conn.defineXML(domain_xml(spec))
 
     def undefine_domain(self, uri: str, name: str) -> None:
+        lib = load_libvirt()
         with self._op(uri) as conn:
             dom = self._lookup(conn, name)
             if dom.isActive():  # libvirt would silently make it transient
                 raise DriverError(f"domain {name} is running")
-            dom.undefine()
+            flag = getattr(lib, "VIR_DOMAIN_UNDEFINE_CHECKPOINTS_METADATA", None)
+            if flag is None:
+                dom.undefine()
+            else:
+                dom.undefineFlags(flag)  # checkpoint metadata would otherwise make undefine fail
 
     def start_domain(self, uri: str, name: str) -> None:
         # No timeout: create() can block for ~the NFS lease after a host death (probe results).
@@ -419,14 +440,25 @@ class LibvirtDriver:
             raise value  # type: ignore[misc]
         return value  # type: ignore[return-value]
 
-    def _check_disk_path(self, path: str) -> None:
-        if os.path.normpath(os.path.dirname(path)) != os.path.normpath(self._storage_root):
-            raise DriverError(f"disk path must be directly under {self._storage_root}")
+    @staticmethod
+    def _dir(path: str) -> str:
+        return os.path.normpath(os.path.dirname(path))
 
-    def _ensure_pools(self, conn) -> list:
+    def _in_dr(self, *paths: str) -> bool:
+        return any(self._dir(p) == os.path.normpath(self._dr_root) for p in paths)
+
+    def _check_disk_path(self, path: str) -> None:
+        if self._dir(path) not in (os.path.normpath(self._storage_root), os.path.normpath(self._dr_root)):
+            raise DriverError(f"disk path must be directly under {self._storage_root} or {self._dr_root}")
+
+    def _ensure_pools(self, conn, dr: bool = False) -> list:
+        """Image and VM pools, plus the DR pool when `dr` (created on demand, same path rule)."""
         lib = load_libvirt()
+        wanted = [(self.IMAGES_POOL, self._image_root), (self.VMS_POOL, self._storage_root)]
+        if dr:
+            wanted.append((self.DR_POOL, self._dr_root))
         pools = []
-        for name, path in ((self.IMAGES_POOL, self._image_root), (self.VMS_POOL, self._storage_root)):
+        for name, path in wanted:
             try:
                 pool = conn.storagePoolLookupByName(name)
             except lib.libvirtError as e:
@@ -442,10 +474,14 @@ class LibvirtDriver:
             pools.append(pool)
         return pools
 
-    def _find_volume(self, conn):
+    def _pool_for(self, pools: list, path: str):
+        """The pool that holds new volumes at `path` (storage_root or dr_root)."""
+        return pools[2] if self._dir(path) == os.path.normpath(self._dr_root) else pools[1]
+
+    def _find_volume(self, conn, dr: bool = False):
         """Return lookup(path) -> volume or None, after ensuring and refreshing the pools."""
         lib = load_libvirt()
-        pools = self._ensure_pools(conn)
+        pools = self._ensure_pools(conn, dr)
         for pool in pools:
             pool.refresh(0)  # the pool caches its volume list; another host may have changed the share
 
@@ -461,7 +497,7 @@ class LibvirtDriver:
 
     def disk_exists(self, path: str) -> bool:
         def run(conn) -> bool:
-            _, lookup = self._find_volume(conn)
+            _, lookup = self._find_volume(conn, self._in_dr(path))
             return lookup(path) is not None
 
         return self._storage(run)
@@ -470,11 +506,14 @@ class LibvirtDriver:
         try:
             base = resolve_image(base_image, self._image_root)  # D-014
         except ValueError as e:
-            raise DriverError(f"invalid base image: {e}") from e
+            try:
+                base = resolve_image(base_image, self._dr_root)  # a DR replica chain overlays DR disks
+            except ValueError:
+                raise DriverError(f"invalid base image: {e}") from e
         self._check_disk_path(path)
 
         def run(conn) -> None:
-            pools, lookup = self._find_volume(conn)
+            pools, lookup = self._find_volume(conn, self._in_dr(path, base))
             if lookup(path) is not None:
                 raise _Precondition(f"disk {path} already exists")
             bvol = lookup(base)
@@ -484,7 +523,7 @@ class LibvirtDriver:
             root = ET.fromstring(bvol.XMLDesc(0))
             fmt = root.find("target/format")
             bfmt = fmt.get("type") if fmt is not None else "qcow2"
-            pools[1].createXML(overlay_volume_xml(os.path.basename(path), capacity, base, bfmt), 0)
+            self._pool_for(pools, path).createXML(overlay_volume_xml(os.path.basename(path), capacity, base, bfmt), 0)
 
         self._storage(run)
 
@@ -492,7 +531,7 @@ class LibvirtDriver:
         self._check_disk_path(path)
 
         def run(conn) -> None:
-            _, lookup = self._find_volume(conn)
+            _, lookup = self._find_volume(conn, self._in_dr(path))
             vol = lookup(path)
             if vol is None:
                 raise _Precondition(f"disk {path} not found")
@@ -546,24 +585,117 @@ class LibvirtDriver:
                     stats = None
                 return migration_result(stats, wall_ms)
 
-    # Task 4 replaces these stubs with the real implementations.
-    def list_checkpoints(self, uri: str, name: str) -> list[str]:
-        raise NotImplementedError
-
-    def delete_checkpoint(self, uri: str, name: str, checkpoint: str) -> None:
-        raise NotImplementedError
-
-    def backup_active(self, uri: str, name: str) -> bool:
-        raise NotImplementedError
-
-    def abort_backup(self, uri: str, name: str) -> None:
-        raise NotImplementedError
-
-    def backup_domain(self, uri: str, name: str, target_path: str, checkpoint: str, since: str | None):
-        raise NotImplementedError
+    # ---- backups and DR disks (M5, D-034) ----
 
     def create_blank_disk(self, path: str, like: str) -> None:
-        raise NotImplementedError
+        self._check_disk_path(path)
+
+        def run(conn) -> None:
+            pools, lookup = self._find_volume(conn, self._in_dr(path, like))
+            if lookup(path) is not None:
+                raise _Precondition(f"disk {path} already exists")
+            lvol = lookup(like)
+            if lvol is None:
+                raise _Precondition(f"disk {like} not found")
+            self._pool_for(pools, path).createXML(blank_volume_xml(os.path.basename(path), lvol.info()[1]), 0)
+
+        self._storage(run)
 
     def disk_allocation(self, path: str) -> int:
-        raise NotImplementedError
+        self._check_disk_path(path)
+
+        def run(conn) -> int:
+            _, lookup = self._find_volume(conn, self._in_dr(path))
+            vol = lookup(path)
+            if vol is None:
+                raise _Precondition(f"disk {path} not found")
+            return int(vol.info()[2])
+
+        return self._storage(run)
+
+    @staticmethod
+    def _sorted_checkpoints(dom) -> list[str]:
+        rows = []
+        for cp in dom.listAllCheckpoints(0):
+            ctime = int(ET.fromstring(cp.getXMLDesc(0)).findtext("creationTime") or 0)
+            rows.append((ctime, cp.name()))
+        return [n for _, n in sorted(rows)]
+
+    def list_checkpoints(self, uri: str, name: str) -> list[str]:
+        with self._op(uri) as conn:
+            return self._sorted_checkpoints(self._lookup(conn, name))
+
+    def delete_checkpoint(self, uri: str, name: str, checkpoint: str) -> None:
+        lib = load_libvirt()
+        with self._op(uri) as conn:
+            dom = self._lookup(conn, name)
+            try:
+                dom.checkpointLookupByName(checkpoint, 0).delete(0)
+            except lib.libvirtError as e:
+                if e.get_error_code() == getattr(lib, "VIR_ERR_NO_DOMAIN_CHECKPOINT", object()):
+                    raise CheckpointNotFound(f"checkpoint {checkpoint} of {name} not found") from e
+                raise
+
+    def backup_active(self, uri: str, name: str) -> bool:
+        lib = load_libvirt()
+        with self._op(uri) as conn:
+            dom = self._lookup(conn, name)
+            if dom.jobInfo()[0] == lib.VIR_DOMAIN_JOB_NONE:
+                return False
+            return dom.jobStats(0).get("operation") == lib.VIR_DOMAIN_JOB_OPERATION_BACKUP
+
+    def abort_backup(self, uri: str, name: str) -> None:
+        lib = load_libvirt()
+        with self._op(uri) as conn:
+            dom = self._lookup(conn, name)
+            if dom.jobInfo()[0] == lib.VIR_DOMAIN_JOB_NONE or (
+                dom.jobStats(0).get("operation") != lib.VIR_DOMAIN_JOB_OPERATION_BACKUP
+            ):
+                raise DriverError(f"no backup job on {name}")
+            dom.abortJob()
+
+    def _drop_checkpoint(self, dom, checkpoint: str) -> None:
+        """Best effort: a failed backup must not leave its new checkpoint behind."""
+        try:
+            if checkpoint in self._sorted_checkpoints(dom):
+                dom.checkpointLookupByName(checkpoint, 0).delete(0)
+        except Exception:
+            log.warning("could not delete checkpoint %s of a failed backup", checkpoint, exc_info=True)
+
+    def backup_domain(self, uri: str, name: str, target_path: str, checkpoint: str, since: str | None) -> BackupResult:
+        lib = load_libvirt()
+        self._check_disk_path(target_path)
+        if not self.disk_exists(target_path):
+            raise DriverError(f"backup target {target_path} not found")
+        with self._op(uri) as conn:
+            dom = self._lookup(conn, name)
+            if not dom.isActive():
+                raise DriverError(f"domain {name} is not running")
+            if checkpoint in self._sorted_checkpoints(dom):
+                raise DriverError(f"checkpoint {checkpoint} already exists on {name}")
+            t0 = time.monotonic()
+            try:
+                dom.backupBegin(
+                    backup_xml(target_path, since),
+                    checkpoint_xml(checkpoint),
+                    lib.VIR_DOMAIN_BACKUP_BEGIN_REUSE_EXTERNAL,
+                )
+            except lib.libvirtError as e:
+                self._drop_checkpoint(dom, checkpoint)
+                if since is not None and e.get_error_code() == getattr(lib, "VIR_ERR_NO_DOMAIN_CHECKPOINT", object()):
+                    raise CheckpointNotFound(f"checkpoint {since} of {name} not found") from e
+                raise
+            try:
+                while dom.jobInfo()[0] != lib.VIR_DOMAIN_JOB_NONE:
+                    if time.monotonic() - t0 >= self._backup_timeout_s:
+                        with contextlib.suppress(lib.libvirtError):
+                            dom.abortJob()
+                        raise DriverError(f"backup of {name} timed out after {self._backup_timeout_s}s")
+                    self._sleep(self.BACKUP_POLL_S)
+                stats = dom.jobStats(lib.VIR_DOMAIN_JOB_STATS_COMPLETED | lib.VIR_DOMAIN_JOB_STATS_KEEP_COMPLETED)
+                if stats.get("type") != lib.VIR_DOMAIN_JOB_COMPLETED:
+                    raise DriverError(f"backup of {name} did not complete (job type {stats.get('type')})")
+            except BaseException:
+                self._drop_checkpoint(dom, checkpoint)
+                raise
+            return BackupResult(duration_ms=int((time.monotonic() - t0) * 1000))

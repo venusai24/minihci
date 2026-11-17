@@ -15,6 +15,7 @@ from minihci.driver.base import (
     HostUnreachable,
     MigrationResult,
 )
+from minihci.driver.fake import FakeDriver
 
 from .conftest import Env
 
@@ -167,12 +168,16 @@ def test_backup_full_incremental_shapes(env: Env):
     with vm(env, start=True) as (name, disk, _):
         t0, t1 = env.disk(name + "-t0"), env.disk(name + "-t1")
         try:
-            if hasattr(d, "write_blocks"):  # FakeDriver: give the guest something to back up
+            # Real-host run (owner only): the guest should also write between the two backups so the
+            # incremental has data; there is no portable way to do that from here, so only the fake does it.
+            if isinstance(d, FakeDriver):
                 d.write_blocks(env.uri1, name, [1, 2])
             d.create_blank_disk(t0, like=disk)
             res = d.backup_domain(env.uri1, name, t0, "c0", None)
             assert isinstance(res, BackupResult) and res.duration_ms >= 0
             assert d.disk_allocation(t0) > 0
+            if isinstance(d, FakeDriver):  # data for the incremental
+                d.write_blocks(env.uri1, name, [3, 4])
             d.create_disk_overlay(t0, t1)
             res = d.backup_domain(env.uri1, name, t1, "c1", "c0")
             assert res.duration_ms >= 0
