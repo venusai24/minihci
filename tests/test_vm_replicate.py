@@ -7,7 +7,7 @@ from sqlalchemy import select
 from minihci.config import Settings
 from minihci.driver.base import DomainState
 from minihci.driver.fake import FAKE_BLOCK_BYTES, FakeDriver
-from minihci.models import Host, ProtectionPolicy, Replica, Vm
+from minihci.models import Host, ProtectionPolicy, Replica, Task, Vm
 from minihci.tasks.engine import enqueue
 from minihci.tasks.executor import StepContext
 from minihci.tasks.types import vm_replicate as vr
@@ -236,3 +236,88 @@ def test_dr_files_flat_under_dr_root(session_factory, driver, vm):
     (row,) = rows(session_factory)
     assert os.path.dirname(row.dr_path) == Settings().dr_root
     assert driver.domain_state(URI, "web1") == DomainState.RUNNING
+
+
+def leftovers(session_factory, driver, vm, abort_polls):
+    """plan done, plus a stray checkpoint of this replica, its target file and a job that unwinds slowly."""
+    ctx = step_ctx(session_factory, driver, vm)
+    vr.plan(ctx)
+    (row,) = rows(session_factory)
+    driver.create_blank_disk("/scratch.qcow2", like=disk_path(session_factory, vm))
+    driver.backup_domain(URI, "web1", "/scratch.qcow2", row.checkpoint, None)
+    driver.create_blank_disk(row.dr_path, like=disk_path(session_factory, vm))
+    driver.set_backup_job(URI, "web1", True, abort_polls=abort_polls)
+    return ctx, row
+
+
+def test_backup_waits_for_aborted_job(session_factory, driver, vm, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(vr, "_sleep", sleeps.append, raising=False)
+    ctx, row = leftovers(session_factory, driver, vm, abort_polls=3)
+    vr.backup(ctx)
+    assert sleeps  # it polled instead of racing the unwinding job
+    assert driver.backup_active(URI, "web1") is False
+    assert driver.list_checkpoints(URI, "web1") == [row.checkpoint]
+
+
+def test_backup_survives_abort_race(session_factory, driver, vm, monkeypatch):
+    """The job ends between backup_active and abort_backup: 'no backup job' is success."""
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    ctx, row = leftovers(session_factory, driver, vm, abort_polls=0)
+    real = driver.abort_backup
+
+    def racing(uri, name):
+        real(uri, name)  # the job is gone now
+        real(uri, name)  # second abort raises DriverError("no backup job")
+
+    monkeypatch.setattr(driver, "abort_backup", racing)
+    vr.backup(ctx)
+    assert driver.list_checkpoints(URI, "web1") == [row.checkpoint]
+
+
+def test_backup_gives_up_if_job_never_ends(session_factory, driver, vm, monkeypatch):
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    ctx, _ = leftovers(session_factory, driver, vm, abort_polls=10_000)
+    with pytest.raises(RuntimeError, match="still active"):
+        vr.backup(ctx)
+
+
+def test_undo_waits_for_aborted_job(session_factory, driver, vm, monkeypatch):
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    ctx, row = leftovers(session_factory, driver, vm, abort_polls=3)
+    vr.undo_backup(ctx)
+    assert driver.list_checkpoints(URI, "web1") == []
+    assert not driver.disk_exists(row.dr_path)
+
+
+def test_undo_still_deletes_file_when_domain_parts_fail(session_factory, driver, vm, monkeypatch):
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    ctx, row = leftovers(session_factory, driver, vm, abort_polls=0)
+    driver.fail = {"delete_checkpoint": 5, "abort_backup": 5}
+    vr.undo_backup(ctx)
+    assert not driver.disk_exists(row.dr_path)
+
+
+def test_prune_sweeps_dead_rows_but_not_open_ones(session_factory, driver, vm, monkeypatch):
+    monkeypatch.setattr(vr, "_sleep", lambda s: None, raising=False)
+    # row 1: undo failed, task finished failed, row still running, file still there
+    ctx1, row1 = leftovers(session_factory, driver, vm, abort_polls=0)
+    with session_factory() as s, s.begin():
+        s.get(Task, ctx1.task_id).state = "failed"
+    # row 2: a failed row whose file was left behind
+    ctx2 = step_ctx(session_factory, driver, vm)
+    vr.plan(ctx2)
+    row2 = rows(session_factory)[-1]
+    driver.create_blank_disk(row2.dr_path, like=disk_path(session_factory, vm))
+    with session_factory() as s, s.begin():
+        s.get(Replica, row2.id).status = "failed"
+    # row 3: running with an OPEN task: must not be touched
+    ctx3 = step_ctx(session_factory, driver, vm)
+    vr.plan(ctx3)
+    row3 = rows(session_factory)[-1]
+    driver.create_blank_disk(row3.dr_path, like=disk_path(session_factory, vm))
+    vr.prune(ctx3)
+    by_id = {r.id: r for r in rows(session_factory)}
+    assert by_id[row1.id].status == "failed" and not driver.disk_exists(row1.dr_path)
+    assert by_id[row2.id].status == "failed" and not driver.disk_exists(row2.dr_path)
+    assert by_id[row3.id].status == "running" and driver.disk_exists(row3.dr_path)

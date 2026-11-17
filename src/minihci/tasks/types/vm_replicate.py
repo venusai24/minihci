@@ -1,10 +1,11 @@
+import time
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
 from minihci.dr.chain import ReplicaInfo, next_replica, prune_ids
-from minihci.driver.base import CheckpointNotFound, DomainNotFound, HostDriver, HostUnreachable
-from minihci.models import Host, ProtectionPolicy, Replica, Vm
+from minihci.driver.base import CheckpointNotFound, DomainNotFound, DriverError, HostDriver, HostUnreachable
+from minihci.models import Host, ProtectionPolicy, Replica, Task, Vm
 from minihci.tasks.executor import Step, StepContext, TaskType
 from minihci.tasks.registry import register
 
@@ -14,6 +15,25 @@ from minihci.tasks.registry import register
 # `minihci-*`: the libvirt driver does not guard names, so the guard lives here.
 
 CHECKPOINT_PREFIX = "minihci-"
+ABORT_POLLS = 60
+ABORT_POLL_S = 0.5
+_sleep = time.sleep  # tests replace it so the wait does not run in real time
+
+
+def stop_backup_job(driver: HostDriver, uri: str, name: str) -> None:
+    """Abort a running backup job and wait until it is really gone: on a real host abortJob() returns while the job
+    is still unwinding, and its checkpoint can only be dropped (or a new backup started) afterwards."""
+    if not driver.backup_active(uri, name):
+        return
+    try:
+        driver.abort_backup(uri, name)
+    except DriverError:
+        pass  # the job ended between the check and the abort ("no backup job"); the poll below decides
+    for _ in range(ABORT_POLLS):
+        if not driver.backup_active(uri, name):
+            return
+        _sleep(ABORT_POLL_S)
+    raise RuntimeError(f"backup job on {name} is still active after abort")
 
 
 def delete_minihci_checkpoints(driver: HostDriver, uri: str, name: str, keep: str | None = None) -> None:
@@ -123,8 +143,7 @@ def backup(ctx: StepContext) -> None:
     vm = _vm(ctx)
     uri = _uri(ctx, row.host_id)
     # Leftovers of an interrupted attempt: a running job, this replica's checkpoint, a half-written target.
-    if ctx.driver.backup_active(uri, vm.name):
-        ctx.driver.abort_backup(uri, vm.name)
+    stop_backup_job(ctx.driver, uri, vm.name)
     if row.checkpoint in ctx.driver.list_checkpoints(uri, vm.name):
         ctx.driver.delete_checkpoint(uri, vm.name, row.checkpoint)
     if ctx.driver.disk_exists(row.dr_path):
@@ -145,14 +164,19 @@ def undo_backup(ctx: StepContext) -> None:
     if row is None or row.status != "running":
         return  # a succeeded replica (a later step failed) must keep its file and checkpoint
     vm = _vm(ctx)
+    # Each domain part may fail (domain gone, host down, job still unwinding); none of that may keep the file here.
     try:
         uri = _uri(ctx, row.host_id)
-        if ctx.driver.backup_active(uri, vm.name):
-            ctx.driver.abort_backup(uri, vm.name)
+        try:
+            stop_backup_job(ctx.driver, uri, vm.name)
+        except (DriverError, RuntimeError) as e:
+            ctx.log.warning("undo_backup: could not stop the backup job: %s", e)
         if row.checkpoint.startswith(CHECKPOINT_PREFIX) and row.checkpoint in ctx.driver.list_checkpoints(uri, vm.name):
             ctx.driver.delete_checkpoint(uri, vm.name, row.checkpoint)
     except (DomainNotFound, HostUnreachable):
         pass
+    except DriverError as e:
+        ctx.log.warning("undo_backup: could not drop checkpoint %s: %s", row.checkpoint, e)
     if row.dr_path and ctx.driver.disk_exists(row.dr_path):
         ctx.driver.delete_disk(row.dr_path)
 
@@ -189,7 +213,39 @@ def trim_checkpoints(ctx: StepContext) -> None:
     delete_minihci_checkpoints(ctx.driver, _uri(ctx, row.host_id), vm.name, keep=row.checkpoint)
 
 
+def sweep_dead_rows(ctx: StepContext) -> None:
+    """Converge leftovers of attempts whose undo did not finish: files of `failed` rows, and of `running` rows whose
+    task is no longer open. Never touches a running row whose task is still open."""
+    with ctx.session_factory() as s:
+        dead = [
+            (r.id, r.status, r.dr_path)
+            for r in s.scalars(
+                select(Replica)
+                .join(Task, Task.id == Replica.task_id)
+                .where(
+                    Replica.vm_id == ctx.target_id,
+                    (Replica.status == "failed")
+                    | ((Replica.status == "running") & Task.state.in_(("failed", "rolled_back"))),
+                )
+            )
+        ]
+    for rid, status, path in dead:
+        if path and ctx.driver.disk_exists(path):
+            ctx.driver.delete_disk(path)
+        if status == "running":
+            with ctx.session_factory() as s, s.begin():
+                row = s.get(Replica, rid)
+                if row.status == "running":
+                    row.status = "failed"
+                    row.finished_at = func.now()
+            ctx.log.info(
+                "replica_swept",
+                extra={"fields": {"event": "replica_swept", "vm_id": ctx.target_id, "replica_id": rid}},
+            )
+
+
 def prune(ctx: StepContext) -> None:
+    sweep_dead_rows(ctx)
     with ctx.session_factory() as s:
         policy = s.get(ProtectionPolicy, ctx.target_id)
         retention = policy.retention if policy else 1

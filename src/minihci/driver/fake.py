@@ -329,11 +329,17 @@ class FakeDriver:
 
         self._call("write_blocks", fn)
 
-    def set_backup_job(self, uri: str, name: str, active: bool) -> None:
-        """Test helper (not part of the protocol): pretend a backup job is (not) running."""
+    def set_backup_job(self, uri: str, name: str, active: bool, abort_polls: int = 0) -> None:
+        """Test helper (not part of the protocol): pretend a backup job is (not) running.
+
+        abort_polls: after abort_backup the job stays visible for that many backup_active polls (like a real host).
+        """
 
         def fn(state: dict[str, Any]) -> None:
-            self._domain(state, uri, name)["backup_job"] = active
+            d = self._domain(state, uri, name)
+            d["backup_job"] = active
+            d["abort_polls"] = abort_polls
+            d.pop("abort_left", None)
 
         self._call("set_backup_job", fn)
 
@@ -342,7 +348,10 @@ class FakeDriver:
 
     def delete_checkpoint(self, uri: str, name: str, checkpoint: str) -> None:
         def fn(state: dict[str, Any]) -> None:
-            cps = self._domain(state, uri, name).get("checkpoints", {})
+            d = self._domain(state, uri, name)
+            if d.get("backup_job"):
+                raise DriverError(f"backup job still active: {name}")  # like a real host mid-abort
+            cps = d.get("checkpoints", {})
             if checkpoint not in cps:
                 raise CheckpointNotFound(f"checkpoint not found: {checkpoint}")
             del cps[checkpoint]
@@ -350,14 +359,25 @@ class FakeDriver:
         self._call("delete_checkpoint", fn)
 
     def backup_active(self, uri: str, name: str) -> bool:
-        return self._call("backup_active", lambda state: bool(self._domain(state, uri, name).get("backup_job")))
+        def fn(state: dict[str, Any]) -> bool:
+            d = self._domain(state, uri, name)
+            if d.get("abort_left", 0) > 0:
+                d["abort_left"] -= 1
+                if d["abort_left"] == 0:
+                    d["backup_job"] = False
+            return bool(d.get("backup_job"))
+
+        return self._call("backup_active", fn)
 
     def abort_backup(self, uri: str, name: str) -> None:
         def fn(state: dict[str, Any]) -> None:
             d = self._domain(state, uri, name)
-            if not d.get("backup_job"):
+            if not d.get("backup_job") or d.get("abort_left", 0) > 0:
                 raise DriverError(f"no backup job: {name}")
-            d["backup_job"] = False
+            if d.get("abort_polls", 0) > 0:
+                d["abort_left"] = d["abort_polls"]  # still unwinding
+            else:
+                d["backup_job"] = False
 
         self._call("abort_backup", fn)
 
@@ -368,6 +388,8 @@ class FakeDriver:
             d = self._domain(state, uri, name)
             if d["state"] != DomainState.RUNNING.value:
                 raise DriverError(f"domain not running: {name}")
+            if d.get("backup_job"):
+                raise DriverError(f"backup job already active: {name}")
             cps = d.setdefault("checkpoints", {})
             if checkpoint in cps:
                 raise DriverError(f"checkpoint exists: {checkpoint}")
