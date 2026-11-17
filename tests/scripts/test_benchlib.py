@@ -70,3 +70,16 @@ def test_summarise_probe_empty():
 def test_format_probe_line():
     assert benchlib.format_probe_line("Q3", True, "alloc=1") == "Q3: PASS alloc=1"
     assert benchlib.format_probe_line("Q4", False, "refused") == "Q4: FAIL refused"
+
+
+def test_compare_argv_ssh_source():
+    argv = benchlib.qemu_img_compare_argv("qemu+ssh://root@host1/system", "/d/a.qcow2", "/dr/b.qcow2")
+    assert argv[:3] == ["ssh", "root@host1", "qemu-img"] or argv[:2] == ["ssh", "root@host1"]
+    assert argv[-2:] == ["/d/a.qcow2", "/dr/b.qcow2"]
+    assert "compare" in argv and "-U" in argv
+
+
+def test_compare_argv_local():
+    argv = benchlib.qemu_img_compare_argv("qemu:///system", "/d/a.qcow2", "/dr/b.qcow2")
+    assert argv[0] == "qemu-img" and "ssh" not in argv
+    assert argv[-2:] == ["/d/a.qcow2", "/dr/b.qcow2"]

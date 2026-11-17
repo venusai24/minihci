@@ -3,6 +3,7 @@
 import math
 import os
 import sys
+from urllib.parse import urlparse
 
 ENV_VAR = "MINIHCI_REAL_HOSTS"
 
@@ -33,6 +34,16 @@ def summarize(ms_list) -> dict:
 def parse_qemu_img_compare(output: str) -> bool:
     """True when `qemu-img compare` reported the two images as identical."""
     return "images are identical" in output.lower()
+
+
+def qemu_img_compare_argv(src_uri: str, disk: str, other: str) -> list[str]:
+    """argv for `qemu-img compare`, run on the source host over ssh (the laptop does not see
+    the hosts' /var/lib/minihci path), or locally when src_uri has no host (qemu:///system)."""
+    cmd = ["qemu-img", "compare", "-U", "-f", "qcow2", "-F", "qcow2", disk, other]
+    parsed = urlparse(src_uri)
+    if not parsed.hostname:
+        return cmd
+    return ["ssh", f"{parsed.username or 'root'}@{parsed.hostname}", *cmd]
 
 
 def format_probe_line(q: str, ok: bool, detail: str) -> str:

@@ -211,12 +211,12 @@ def q1(src, dom, full, cap):
                        "keep_completed_needed_after_NONE": needed}))
 
 
-def q2(dom, vm_disk, full, inc):
+def q2(dom, vm_disk, full, inc, src_uri):
     dom.suspend()
     try:
         done = run_backup(dom, inc, "cp2", incremental="cp1")
         keys = stats_keys(dom, lv.VIR_DOMAIN_JOB_STATS_COMPLETED | lv.VIR_DOMAIN_JOB_STATS_KEEP_COMPLETED)
-        rc, out = sh(["qemu-img", "compare", "-U", "-f", "qcow2", "-F", "qcow2", vm_disk, inc])
+        rc, out = sh(benchlib.qemu_img_compare_argv(src_uri, vm_disk, inc))
         same = benchlib.parse_qemu_img_compare(out)
     finally:
         dom.resume()
@@ -371,7 +371,7 @@ def main():
         pools.create_vol(dr, inc, cap, backing=full)  # overlay on the full copy
 
         guarded("Q1", q1, src, dom, full, cap)
-        guarded("Q2", q2, dom, a.disk, full, inc)
+        guarded("Q2", q2, dom, a.disk, full, inc, a.src)
         guarded("Q3", q3, dr, full, inc, a.idle)
         guarded("Q4", q4, dom, src, dst, a.dst_uri)
         dom5 = guarded("Q5", q5, src, a.disk, blank, cap, pools)
