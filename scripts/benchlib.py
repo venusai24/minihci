@@ -30,6 +30,20 @@ def summarize(ms_list) -> dict:
     return {"median": median, "p90": p90, "worst": xs[-1]}
 
 
+def parse_qemu_img_compare(output: str) -> bool:
+    """True when `qemu-img compare` reported the two images as identical."""
+    return "images are identical" in output.lower()
+
+
+def format_probe_line(q: str, ok: bool, detail: str) -> str:
+    return f"{q}: {'PASS' if ok else 'FAIL'} {detail}"
+
+
+def summarise_probe(results: list[dict]) -> dict:
+    """[{"q": "Q1", "ok": True, ...}, ...] -> {"Q1": "PASS", ...}"""
+    return {r["q"]: "PASS" if r["ok"] else "FAIL" for r in results}
+
+
 def _cell(v) -> str:
     return "-" if v is None else str(v)
 

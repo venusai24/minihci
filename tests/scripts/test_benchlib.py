@@ -47,3 +47,26 @@ def test_render_markdown_empty_never_invents():
     md = benchlib.render_markdown({}, [], benchlib.summarize([]))
     assert "no measurements" in md.lower()
     assert "median: n/a" in md
+
+
+def test_parse_qemu_img_compare_identical():
+    assert benchlib.parse_qemu_img_compare("Images are identical.\n") is True
+
+
+def test_parse_qemu_img_compare_differs():
+    assert benchlib.parse_qemu_img_compare("Content mismatch at offset 65536!\n") is False
+    assert benchlib.parse_qemu_img_compare("") is False
+
+
+def test_summarise_probe():
+    results = [{"q": "Q1", "ok": True, "detail": "x"}, {"q": "Q2", "ok": False, "detail": "y"}]
+    assert benchlib.summarise_probe(results) == {"Q1": "PASS", "Q2": "FAIL"}
+
+
+def test_summarise_probe_empty():
+    assert benchlib.summarise_probe([]) == {}
+
+
+def test_format_probe_line():
+    assert benchlib.format_probe_line("Q3", True, "alloc=1") == "Q3: PASS alloc=1"
+    assert benchlib.format_probe_line("Q4", False, "refused") == "Q4: FAIL refused"
