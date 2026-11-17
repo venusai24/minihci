@@ -8,6 +8,7 @@ from minihci.scheduler.placement import PLACEABLE_STATUSES, fits
 from minihci.tasks.executor import Step, StepContext, TaskType
 from minihci.tasks.locks import LOCK_NAMESPACE
 from minihci.tasks.registry import register
+from minihci.tasks.types.vm_replicate import delete_minihci_checkpoints
 
 # Forward-only (D-024): no step has an undo. Every step looks at where the domain really is first.
 # The worker already holds the per-VM advisory lock; check_destination also takes the scheduler lock (3, 0).
@@ -59,6 +60,8 @@ def migrate(ctx: StepContext) -> None:
     src_state = ctx.driver.domain_state(src, name)
     dst_state = ctx.driver.domain_state(dst, name)
     if src_state == DomainState.RUNNING and dst_state is None:
+        # D-034: checkpoints do not travel with the domain; drop ours (and their bitmaps) so the next replica is full.
+        delete_minihci_checkpoints(ctx.driver, src, name)
         result = ctx.driver.migrate_live(src, dst, name)
         with ctx.session_factory() as s, s.begin():
             row = s.scalars(select(Migration).where(Migration.task_id == ctx.task_id)).one()

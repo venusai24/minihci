@@ -8,4 +8,5 @@ from minihci.tasks.types import (
     vm_ha_restart,  # noqa: F401
     vm_migrate,  # noqa: F401
     vm_power,  # noqa: F401
+    vm_replicate,  # noqa: F401
 )

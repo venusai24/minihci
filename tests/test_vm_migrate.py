@@ -185,3 +185,15 @@ def test_sync_host_domain_on_source_only(session_factory, driver, host_id, dst_i
     assert host_of(session_factory, vm) == host_id
     assert not _events(caplog, "migrate_host_drift")
     assert not _events(caplog, "migrate_placement_ambiguous")
+
+
+def test_migrate_drops_minihci_checkpoints_only(session_factory, driver, host_id, dst_id):
+    vm = make_vm(session_factory, driver, host_id)
+    driver.create_blank_disk("/s.qcow2", like="/d/web1.qcow2")
+    for cp in ("minihci-r1", "user-ckpt"):
+        driver.backup_domain(URI, "web1", "/s.qcow2", cp, None)
+        driver.delete_disk("/s.qcow2")
+        driver.create_blank_disk("/s.qcow2", like="/d/web1.qcow2")
+    t = migrate(session_factory, driver, vm, host_id, dst_id)
+    assert t.state == "succeeded"
+    assert driver.list_checkpoints(URI_B, "web1") == ["user-ckpt"]
