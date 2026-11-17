@@ -46,6 +46,39 @@ def qemu_img_compare_argv(src_uri: str, disk: str, other: str) -> list[str]:
     return ["ssh", f"{parsed.username or 'root'}@{parsed.hostname}", *cmd]
 
 
+def retry_until(fn, timeout_s, interval_s, *, sleep=None, now=None, retry_on=(Exception,)):
+    """Call fn() until it returns; retry on `retry_on` errors for up to timeout_s seconds.
+
+    Returns (result, seconds_waited). Raises the LAST error once another interval would pass the
+    deadline. Errors outside `retry_on` propagate at once. sleep/now are injectable for tests."""
+    import time
+
+    sleep = sleep or time.sleep
+    now = now or time.monotonic
+    start = now()
+    while True:
+        try:
+            return fn(), now() - start
+        except retry_on:
+            if now() - start + interval_s > timeout_s:
+                raise
+            sleep(interval_s)
+
+
+def probe_paths(dr_root: str, name: str, run: str) -> dict:
+    """DR-share file names for one probe run. Every name carries the run id, so a name is never
+    reused: a host that cached "no such file" for a deleted name (NFS negative lookup cache)
+    cannot then fail on a freshly created file of the same name."""
+    base = f"{dr_root.rstrip('/')}/{name}-{run}"
+    return {
+        "full": f"{base}-full.qcow2",
+        "inc": f"{base}-inc1.qcow2",
+        "blank_q5": f"{base}-blank-q5.qcow2",
+        "blank_q6": f"{base}-blank-q6.qcow2",
+        "boot": f"{base}-boot.qcow2",
+    }
+
+
 def format_probe_line(q: str, ok: bool, detail: str) -> str:
     return f"{q}: {'PASS' if ok else 'FAIL'} {detail}"
 

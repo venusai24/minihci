@@ -291,8 +291,23 @@ def q5(src, vm_disk, blank, cap, pools):
     return dom
 
 
+POOL_SCAN_RETRY_S = 40  # > the 15 s NFS lease the lab uses, plus slack
+POOL_SCAN_INTERVAL_S = 3
+
+
 def q6(dom, blank2, cap, pools, dr):
-    pools.create_vol(dr, blank2, cap)
+    # Creating a volume refreshes (scans) the whole DR directory, and the scan opens every file in
+    # it. Twice that failed with "Resource temporarily unavailable" on the Q5 target, before the
+    # backup below even started. Hypothesis: the host that wrote the file still holds an NFS
+    # delegation, so the laptop's open() fails until it is returned. Retry, and report how long it
+    # took: a wait of about the NFS lease confirms it; failing for the whole window does not.
+    try:
+        _, waited = benchlib.retry_until(
+            lambda: pools.create_vol(dr, blank2, cap),
+            POOL_SCAN_RETRY_S, POOL_SCAN_INTERVAL_S, retry_on=(lv.libvirtError,))
+    except lv.libvirtError as e:
+        record("Q6", False, f"pool scan still failing after {POOL_SCAN_RETRY_S} s, backup never started: {e}")
+        return
     before = checkpoint_names(dom)
     try:
         dom.backupBegin(backup_xml(blank2), checkpoint_xml("cp-abort"),
@@ -301,11 +316,12 @@ def q6(dom, blank2, cap, pools, dr):
         time.sleep(2)
         after = checkpoint_names(dom)
         record("Q6", "cp-abort" not in after,
-               json.dumps({"checkpoints_before": before, "checkpoints_after_abort": after,
+               json.dumps({"pool_scan_wait_s": round(waited, 1),
+                           "checkpoints_before": before, "checkpoints_after_abort": after,
                            "new_checkpoint_still_listed": "cp-abort" in after,
                            "note": "PASS = the aborted checkpoint is gone"}))
     except lv.libvirtError as e:
-        record("Q6", False, f"backupBegin/abortJob error: {e}")
+        record("Q6", False, f"pool_scan_wait_s={round(waited, 1)}; backupBegin/abortJob error: {e}")
 
 
 def q7(dr, inc, boot_disk, cap, pools):
@@ -356,12 +372,16 @@ def main():
     lv.registerErrorHandler(lambda ctx, err: None, None)
     start_event_loop()
 
-    full = f"{a.dr_root}/{NAME}-full.qcow2"
-    inc = f"{a.dr_root}/{NAME}-inc1.qcow2"
-    blank = f"{a.dr_root}/{NAME}-blank-q5.qcow2"
-    blank2 = f"{a.dr_root}/{NAME}-blank-q6.qcow2"
-    boot = f"{a.dr_root}/{NAME}-boot.qcow2"
-    top_down = [boot, blank2, blank, inc, full, a.disk]
+    # Unique file names per run: a host that cached "no such file" for a deleted name (NFS negative
+    # lookup cache) failed on a recreated file of the same name (SELinux relabel: No such file).
+    paths = benchlib.probe_paths(a.dr_root, NAME, time.strftime("%y%m%d%H%M%S"))
+    full, inc, blank, blank2, boot = (paths[k] for k in ("full", "inc", "blank_q5", "blank_q6", "boot"))
+    leftovers = []  # probe files an earlier (killed or older) run left on the DR share
+    if os.path.isdir(a.dr_root):
+        leftovers = sorted(
+            (os.path.join(a.dr_root, f) for f in os.listdir(a.dr_root)
+             if f.startswith(NAME + "-") and f.endswith(".qcow2")), reverse=True)
+    top_down = [boot, blank2, blank, inc, full, a.disk, *leftovers]
 
     src = dr = dst = None
     pools = Pools()
