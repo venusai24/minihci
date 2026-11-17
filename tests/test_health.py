@@ -37,7 +37,10 @@ def test_ok_never_heartbeated():
         ("suspect", 3, at(0), at(20), ("suspect", 4, at(0))),
         ("suspect", 5, at(0), at(29.9), ("suspect", 6, at(0))),
         ("suspect", 5, at(0), at(30), ("dead", 6, at(0))),
-        ("ready", 0, at(0), at(31), ("dead", 1, at(0))),  # long gap: straight to dead
+        # stale baseline (e.g. control plane was down): the first misses must not mark it dead
+        ("ready", 0, at(0), at(1000), ("ready", 1, at(0))),
+        ("ready", 1, at(0), at(1000), ("ready", 2, at(0))),
+        ("ready", 2, at(0), at(1000), ("dead", 3, at(0))),  # third miss and past the dead clock
         ("dead", 20, at(0), at(35), ("dead", 21, at(0))),
         ("dead", 20, at(0), at(1000), ("dead", 21, at(0))),
     ],

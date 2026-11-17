@@ -23,7 +23,12 @@ def next_health(
     missed += 1
     if last_heartbeat is None:
         last_heartbeat = now
-    if status == "dead" or (now - last_heartbeat).total_seconds() >= settings.heartbeat_dead_after_s:
+    if status == "dead":
+        return "dead", missed, last_heartbeat
+    # Dead needs both the elapsed time and the same number of misses as suspect, so a stale baseline
+    # (control plane down, worker restart) cannot declare a host dead on its first slow ping.
+    stale = (now - last_heartbeat).total_seconds() >= settings.heartbeat_dead_after_s
+    if stale and missed >= settings.heartbeat_suspect_misses:
         return "dead", missed, last_heartbeat
     if missed >= settings.heartbeat_suspect_misses:
         return "suspect", missed, last_heartbeat
