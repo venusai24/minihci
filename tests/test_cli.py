@@ -337,3 +337,41 @@ def test_scheduler_set_nothing(monkeypatch):
     res = runner.invoke(cli.app, ["scheduler", "set"])
     assert res.exit_code == 1
     assert reqs == []
+
+
+def test_end_to_end_against_api(monkeypatch, session_factory):
+    from fastapi.testclient import TestClient
+
+    from minihci.app import create_app
+    from minihci.config import Settings
+    from minihci.driver.fake import FakeDriver
+    from tests.helpers import drain
+
+    uri = "qemu+ssh://a/system"
+    drv = FakeDriver()
+    drv.add_host(uri, 8, 16384)
+    api = TestClient(create_app(Settings(), session_factory=session_factory))
+    monkeypatch.setattr(cli, "make_client", lambda base: api)
+
+    def run(*args):
+        res = runner.invoke(cli.app, list(args))
+        assert res.exit_code == 0, res.output
+        return res
+
+    res = run("--json", "hosts", "add", "a", uri)
+    host_task = json.loads(res.stdout)["task_id"]
+    drain(session_factory, drv)
+    run("tasks", "wait", str(host_task), "--interval", "0")
+
+    run("vms", "create", "web1", "--vcpus", "1", "--mem-mb", "512", "--image", "/srv/minihci/base/alpine.qcow2")
+    drain(session_factory, drv)
+    vms = json.loads(run("--json", "vms", "list").stdout)
+    assert [(v["name"], v["actual_state"]) for v in vms] == [("web1", "running")]
+
+
+def test_console_script_help():
+    import subprocess
+
+    res = subprocess.run(["uv", "run", "minihci", "--help"], check=False, capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    assert "hosts" in res.stdout
