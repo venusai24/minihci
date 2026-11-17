@@ -48,6 +48,75 @@ def test_verdict_pass_and_fail():
     assert acceptance_m5.verdict(1000.0, 910.0, 60) == (90.0, True)  # boundary interval+30
 
 
+def test_restart_lines_exact_empty_and_partial():
+    assert acceptance_m5.restart_lines(["host1", "host2"]) == [
+        "To bring the primary site back, run:",
+        "virsh -c qemu:///system start host1",
+        "virsh -c qemu:///system start host2",
+    ]
+    assert acceptance_m5.restart_lines([]) == ["No host VM was destroyed; nothing to restart."]
+    partial = acceptance_m5.restart_lines(["host1", "host2"], uncertain="host2")
+    assert "virsh -c qemu:///system start host2" in partial
+    assert "host2" in partial[-1] and "unknown" in partial[-1]
+
+
+def _run(names, destroy=None, wait_dead=None, after=None):
+    out: list[str] = []
+
+    def noop(*a):
+        return None
+
+    try:
+        acceptance_m5.run_site_loss(names, destroy or noop, wait_dead or noop, after or noop, out.append)
+        err = None
+    except (RuntimeError, SystemExit) as e:
+        err = e
+    return out, err
+
+
+def test_restart_printed_on_success():
+    out, err = _run(["host1", "host2"])
+    assert err is None
+    assert out[-2:] == ["virsh -c qemu:///system start host1", "virsh -c qemu:///system start host2"]
+
+
+def test_restart_printed_when_second_destroy_fails():
+    def destroy(n):
+        if n == "host2":
+            raise RuntimeError("boom")
+
+    out, err = _run(["host1", "host2", "host3"], destroy=destroy)
+    assert isinstance(err, RuntimeError)
+    assert "virsh -c qemu:///system start host1" in out
+    assert "virsh -c qemu:///system start host2" in out
+    assert not any("host3" in line for line in out)
+    assert "unknown" in out[-1]
+
+
+def test_restart_printed_when_wait_or_failover_fails():
+    def bad():
+        raise SystemExit("nope")
+
+    for kw in ({"wait_dead": bad}, {"after": bad}):
+        out, err = _run(["host1"], **kw)
+        assert isinstance(err, SystemExit)
+        assert out[-1] == "virsh -c qemu:///system start host1"
+
+
+def test_wait_all_dead_uses_own_deadline_and_times_out():
+    clock = [1000.0]
+
+    def sleep(s):
+        clock[0] += s
+
+    calls = []
+    ok = acceptance_m5.wait_all_dead(lambda: calls.append(1) or False, 10, sleep=sleep, now=lambda: clock[0])
+    assert ok is False and len(calls) > 2
+    clock[0] = 5000.0  # time spent elsewhere does not matter: the deadline starts at the call
+    n = []
+    assert acceptance_m5.wait_all_dead(lambda: len(n.append(1) or n) >= 3, 10, sleep=sleep, now=lambda: clock[0])
+
+
 def test_scripts_refuse_without_env(tmp_path):
     env = {k: v for k, v in os.environ.items() if k != "MINIHCI_REAL_HOSTS"}
     env["PYTHONPATH"] = str(ROOT)

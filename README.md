@@ -198,8 +198,9 @@ minihci vms failover 1 --wait          # needs the VM's host to be dead; --force
 
 Owner scripts (they refuse to run without `MINIHCI_REAL_HOSTS`; read them first):
 `scripts/bench_dr.py` (sync size and time per round, `--api --vm --rounds --write-mib`) and
-`scripts/acceptance_m5.py` (destroys host1-3, fails over, measures lost writes; its last line says how
-to start the hosts again with `virsh -c qemu:///system start hostN`). Guests are CirrOS, reached over
+`scripts/acceptance_m5.py` (destroys host1-3, fails over, measures lost writes; once it has started
+destroying hosts, it always ends, on success and on every failure path, by printing the
+`virsh -c qemu:///system start hostN` lines for the hosts it touched). Guests are CirrOS, reached over
 `virsh console` through pexpect (`scripts/guestlib.py`).
 
 **Known limitations** (D-033, D-037):
