@@ -161,3 +161,12 @@ def test_close_callback_then_failed_ping_closes_once(stub_libvirt, mgr):
     mgr.drop(U1)
     assert a.close_count == 1
     assert mgr.closed == [U1]
+
+
+def test_drop_fires_on_close_hook_once_per_removed_conn(stub_libvirt, mgr):
+    mgr.get(U1)
+    mgr.drop(U1)
+    assert mgr.closed == [U1]
+    assert U1 not in mgr.cached_uris()
+    mgr.drop(U1)  # nothing cached: no hook
+    assert mgr.closed == [U1]

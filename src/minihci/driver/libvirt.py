@@ -160,6 +160,11 @@ class LibvirtConnections:
             conn = self._conns.pop(uri, None)
         if conn is not None:
             _quiet_close(conn)
+            if self._on_close is not None:
+                try:
+                    self._on_close(uri)
+                except Exception:
+                    log.exception("on_close hook failed", extra={"uri": uri})
 
     def ping(self, uri: str, timeout: float = 3) -> bool:
         """True if the host answers within timeout. A still-running earlier ping counts as a miss."""
