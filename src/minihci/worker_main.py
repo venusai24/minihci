@@ -12,6 +12,7 @@ from sqlalchemy.pool import NullPool
 from minihci import reconcile
 from minihci.config import Settings
 from minihci.db import make_engine, make_session_factory
+from minihci.dr import scheduler as dr_scheduler
 from minihci.driver import build_driver
 from minihci.ha import heartbeat
 from minihci.logging import configure_logging
@@ -96,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
             threading.Thread(
                 target=heartbeat.run_forever, args=(stop, session_factory, driver, settings), name="heartbeat"
             )
+        )
+        threads.append(
+            threading.Thread(target=dr_scheduler.run_forever, args=(stop, session_factory, settings), name="replicator")
         )
         for th in threads:
             th.start()
