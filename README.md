@@ -282,8 +282,9 @@ probably NFS client lock retry, but that is not verified.
 | Incremental size, 8 MiB written per round (median / worst) | 9179136 / 9310208 bytes (n=5) | `bench_dr.py --rounds 5`, `docs/benchmarks/dr-bench-2026-11-17.md` | preliminary |
 | Sync time, full copy | TBD (no full copy in the run) | `bench_dr.py` | TBD |
 | Achieved RPO | TBD | `acceptance_m5.py` (not run; `within_target` ignores backup duration, see M5 limitations) | TBD |
-| Data loss, API `data_loss_s` (lower bound, control-plane clock) | TBD | `acceptance_m5.py` (not run) | TBD |
-| Failover time | TBD | `acceptance_m5.py` (not run) | TBD |
+| Data loss, API `data_loss_s` (lower bound, control-plane clock) | 60.4 s, within the 90 s target (interval 60 s + 30 s slack) | failover task 114, read from `minihci vms failovers 1`, n=1 | preliminary |
+| Failover time | 2662 ms | failover task 114, `failover_ms` from `minihci vms failovers 1`, n=1 | preliminary |
+| Data loss, guest marker check | not measured (`acceptance_m5.py` stopped at its guest console check after the failover) | `acceptance_m5.py` | TBD |
 
 ### Scripted benchmarks
 
