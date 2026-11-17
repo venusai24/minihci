@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     api_token: str | None = None  # set it to require "Authorization: Bearer <token>" on every API route
     storage_root: str = "/srv/minihci/images"
     image_root: str = "/srv/minihci/base"
+    dr_root: str = "/srv/minihci/dr"
+    replication_tick_s: float = 5
+    replication_retry_s: float = 60
+    backup_timeout_s: float = 1800
     # D-026: hosts tried in order for disk operations. qemu:///system is the NFS server machine itself;
     # a deployment appends the qemu+ssh:// URIs of its hosts as fallbacks.
     libvirt_storage_uris: list[str] = ["qemu:///system"]

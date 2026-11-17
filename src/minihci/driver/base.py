@@ -15,6 +15,9 @@ class DomainNotFound(DriverError): ...
 class DomainExists(DriverError): ...
 
 
+class CheckpointNotFound(DriverError): ...
+
+
 @dataclass(frozen=True)
 class HostInfo:
     cpu_total: int
@@ -39,6 +42,11 @@ class DomainSpec:
 class MigrationResult:
     duration_ms: int
     downtime_ms: int | None
+
+
+@dataclass(frozen=True)
+class BackupResult:
+    duration_ms: int
 
 
 class DomainState(StrEnum):
@@ -87,3 +95,17 @@ class HostDriver(Protocol):
     # DomainNotFound if not on src; DriverError if not running or name exists on dst;
     # HostUnreachable for unknown host. On any error the domain stays on src.
     def migrate_live(self, src_uri: str, dst_uri: str, name: str) -> MigrationResult: ...
+    def list_checkpoints(self, uri: str, name: str) -> list[str]: ...  # oldest first; DomainNotFound
+    def delete_checkpoint(self, uri: str, name: str, checkpoint: str) -> None: ...  # DomainNotFound; CheckpointNotFound
+    def backup_active(self, uri: str, name: str) -> bool: ...  # DomainNotFound
+    def abort_backup(self, uri: str, name: str) -> None: ...  # DomainNotFound; DriverError if no backup job
+    # Synchronous push backup of disk vda into the EXISTING qcow2 target_path, creating checkpoint `checkpoint`.
+    # since=None: full; else incremental since that checkpoint. DomainNotFound; DriverError if not running,
+    # if `checkpoint` already exists or target_path is missing; CheckpointNotFound if `since` is missing.
+    # On any failure the new checkpoint does not exist afterwards.
+    def backup_domain(
+        self, uri: str, name: str, target_path: str, checkpoint: str, since: str | None
+    ) -> BackupResult: ...
+    # create_blank_disk: qcow2, capacity of `like`; DriverError if path exists or like missing
+    def create_blank_disk(self, path: str, like: str) -> None: ...
+    def disk_allocation(self, path: str) -> int: ...  # bytes allocated on storage; DriverError if missing

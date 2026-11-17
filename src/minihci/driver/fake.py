@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from minihci.driver.base import (
+    BackupResult,
+    CheckpointNotFound,
     DomainExists,
     DomainNotFound,
     DomainSpec,
@@ -24,6 +26,7 @@ from minihci.driver.base import (
 )
 
 FAKE_DOWNTIME_MS = 30
+FAKE_BLOCK_BYTES = 65536
 
 
 class FakeDriver:
@@ -197,7 +200,7 @@ class FakeDriver:
             d = self._domain(state, uri, name)
             if DomainState(d["state"]).active:
                 raise DriverError(f"cannot undefine active domain: {name}")
-            del state["hosts"][uri]["domains"][name]
+            del state["hosts"][uri]["domains"][name]  # its checkpoints go with it
 
         self._call("undefine_domain", fn)
 
@@ -268,6 +271,7 @@ class FakeDriver:
             if path not in state["disks"]:
                 raise DriverError(f"disk missing: {path}")
             del state["disks"][path]
+            state.get("blocks", {}).pop(path, None)
 
         self._call("delete_disk", fn)
 
@@ -288,3 +292,114 @@ class FakeDriver:
             return MigrationResult(duration_ms=int((time.monotonic() - t0) * 1000), downtime_ms=FAKE_DOWNTIME_MS)
 
         return self._call("migrate_live", fn)
+
+    # ---- checkpoints, push backups, block-map disks ---------------------
+    # state["blocks"][path] = {str(block): version} (JSON keys are strings); state["seq"] is the version counter.
+    @staticmethod
+    def _read_disk(state: dict[str, Any], path: str) -> dict[int, int]:
+        chain, seen, cur = [], set(), path
+        while cur in state["disks"] and cur not in seen:  # a backing path outside `disks` contributes nothing
+            seen.add(cur)
+            chain.append(cur)
+            cur = state["disks"][cur]
+        out: dict[int, int] = {}
+        for p in reversed(chain):  # base first, so the nearest overlay wins
+            for b, v in state.get("blocks", {}).get(p, {}).items():
+                out[int(b)] = v
+        return out
+
+    def read_disk(self, path: str) -> dict[int, int]:
+        """Test helper (not part of the protocol): block -> version, backing chain resolved."""
+        with self._locked() as state:
+            return self._read_disk(state, path)
+
+    def write_blocks(self, uri: str, name: str, blocks: list[int]) -> None:
+        """Test helper (not part of the protocol): the guest writes to its disk."""
+
+        def fn(state: dict[str, Any]) -> None:
+            d = self._domain(state, uri, name)
+            if d["state"] != DomainState.RUNNING.value:
+                raise DriverError(f"domain not running: {name}")
+            disk = state.setdefault("blocks", {}).setdefault(d["disk_path"], {})
+            for b in blocks:
+                state["seq"] = state.get("seq", 0) + 1
+                disk[str(b)] = state["seq"]
+            for dirty in d.get("checkpoints", {}).values():
+                dirty.extend(b for b in blocks if b not in dirty)
+
+        self._call("write_blocks", fn)
+
+    def set_backup_job(self, uri: str, name: str, active: bool) -> None:
+        """Test helper (not part of the protocol): pretend a backup job is (not) running."""
+
+        def fn(state: dict[str, Any]) -> None:
+            self._domain(state, uri, name)["backup_job"] = active
+
+        self._call("set_backup_job", fn)
+
+    def list_checkpoints(self, uri: str, name: str) -> list[str]:
+        return self._call("list_checkpoints", lambda state: list(self._domain(state, uri, name).get("checkpoints", {})))
+
+    def delete_checkpoint(self, uri: str, name: str, checkpoint: str) -> None:
+        def fn(state: dict[str, Any]) -> None:
+            cps = self._domain(state, uri, name).get("checkpoints", {})
+            if checkpoint not in cps:
+                raise CheckpointNotFound(f"checkpoint not found: {checkpoint}")
+            del cps[checkpoint]
+
+        self._call("delete_checkpoint", fn)
+
+    def backup_active(self, uri: str, name: str) -> bool:
+        return self._call("backup_active", lambda state: bool(self._domain(state, uri, name).get("backup_job")))
+
+    def abort_backup(self, uri: str, name: str) -> None:
+        def fn(state: dict[str, Any]) -> None:
+            d = self._domain(state, uri, name)
+            if not d.get("backup_job"):
+                raise DriverError(f"no backup job: {name}")
+            d["backup_job"] = False
+
+        self._call("abort_backup", fn)
+
+    def backup_domain(self, uri: str, name: str, target_path: str, checkpoint: str, since: str | None) -> BackupResult:
+        t0 = time.monotonic()
+
+        def fn(state: dict[str, Any]) -> BackupResult:
+            d = self._domain(state, uri, name)
+            if d["state"] != DomainState.RUNNING.value:
+                raise DriverError(f"domain not running: {name}")
+            cps = d.setdefault("checkpoints", {})
+            if checkpoint in cps:
+                raise DriverError(f"checkpoint exists: {checkpoint}")
+            if target_path not in state["disks"]:
+                raise DriverError(f"backup target missing: {target_path}")
+            if since is not None and since not in cps:
+                raise CheckpointNotFound(f"checkpoint not found: {since}")
+            src = self._read_disk(state, d["disk_path"])
+            wanted = src.keys() if since is None else {b for b in cps[since] if b in src}
+            tgt = state.setdefault("blocks", {}).setdefault(target_path, {})
+            for b in wanted:
+                tgt[str(b)] = src[b]
+            cps[checkpoint] = []
+            return BackupResult(duration_ms=int((time.monotonic() - t0) * 1000))
+
+        return self._call("backup_domain", fn)
+
+    def create_blank_disk(self, path: str, like: str) -> None:
+        def fn(state: dict[str, Any]) -> None:
+            if path in state["disks"]:
+                raise DriverError(f"disk exists: {path}")
+            if like not in state["disks"]:
+                raise DriverError(f"disk missing: {like}")
+            state["disks"][path] = None
+            state.setdefault("blocks", {})[path] = {}
+
+        self._call("create_blank_disk", fn)
+
+    def disk_allocation(self, path: str) -> int:
+        def fn(state: dict[str, Any]) -> int:
+            if path not in state["disks"]:
+                raise DriverError(f"disk missing: {path}")
+            return len(state.get("blocks", {}).get(path, {})) * FAKE_BLOCK_BYTES
+
+        return self._call("disk_allocation", fn)

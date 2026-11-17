@@ -158,3 +158,59 @@ def test_unknown_host_is_unreachable(env: Env):
 
 def test_ping_known_host_true(env: Env):
     assert env.driver.ping(env.uri1, 5) is True
+
+
+def test_backup_full_incremental_shapes(env: Env):
+    from minihci.driver.base import BackupResult
+
+    d = env.driver
+    with vm(env, start=True) as (name, disk, _):
+        t0, t1 = env.disk(name + "-t0"), env.disk(name + "-t1")
+        try:
+            if hasattr(d, "write_blocks"):  # FakeDriver: give the guest something to back up
+                d.write_blocks(env.uri1, name, [1, 2])
+            d.create_blank_disk(t0, like=disk)
+            res = d.backup_domain(env.uri1, name, t0, "c0", None)
+            assert isinstance(res, BackupResult) and res.duration_ms >= 0
+            assert d.disk_allocation(t0) > 0
+            d.create_disk_overlay(t0, t1)
+            res = d.backup_domain(env.uri1, name, t1, "c1", "c0")
+            assert res.duration_ms >= 0
+            assert d.list_checkpoints(env.uri1, name) == ["c0", "c1"]
+        finally:
+            for t in (t1, t0):
+                if d.disk_exists(t):
+                    d.delete_disk(t)
+
+
+def test_backup_since_missing_raises_checkpoint_not_found(env: Env):
+    from minihci.driver.base import CheckpointNotFound
+
+    d = env.driver
+    with vm(env, start=True) as (name, disk, _):
+        t0 = env.disk(name + "-t0")
+        try:
+            d.create_blank_disk(t0, like=disk)
+            with pytest.raises(CheckpointNotFound):
+                d.backup_domain(env.uri1, name, t0, "c1", "nope")
+            assert d.list_checkpoints(env.uri1, name) == []
+        finally:
+            if d.disk_exists(t0):
+                d.delete_disk(t0)
+
+
+def test_blank_disk_exists_and_deletes(env: Env):
+    d = env.driver
+    with vm(env) as (name, disk, _):
+        t0 = env.disk(name + "-blank")
+        try:
+            d.create_blank_disk(t0, like=disk)
+            assert d.disk_exists(t0)
+            with pytest.raises(DriverError):
+                d.create_blank_disk(t0, like=disk)
+        finally:
+            if d.disk_exists(t0):
+                d.delete_disk(t0)
+        assert not d.disk_exists(t0)
+        with pytest.raises(DriverError):
+            d.disk_allocation(t0)

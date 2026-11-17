@@ -545,3 +545,25 @@ class LibvirtDriver:
                     log.warning("migration job stats unavailable for %s", name, exc_info=True)
                     stats = None
                 return migration_result(stats, wall_ms)
+
+    # Task 4 replaces these stubs with the real implementations.
+    def list_checkpoints(self, uri: str, name: str) -> list[str]:
+        raise NotImplementedError
+
+    def delete_checkpoint(self, uri: str, name: str, checkpoint: str) -> None:
+        raise NotImplementedError
+
+    def backup_active(self, uri: str, name: str) -> bool:
+        raise NotImplementedError
+
+    def abort_backup(self, uri: str, name: str) -> None:
+        raise NotImplementedError
+
+    def backup_domain(self, uri: str, name: str, target_path: str, checkpoint: str, since: str | None):
+        raise NotImplementedError
+
+    def create_blank_disk(self, path: str, like: str) -> None:
+        raise NotImplementedError
+
+    def disk_allocation(self, path: str) -> int:
+        raise NotImplementedError
