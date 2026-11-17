@@ -185,6 +185,9 @@ class FakeCheckpoint:
 
     def delete(self, flags=0):
         self.dom._check("checkpointDelete")
+        if self.dom.checkpoint_delete_failures > 0:
+            self.dom.checkpoint_delete_failures -= 1
+            raise _err("VIR_ERR_OPERATION_FAILED", "checkpoint is busy")
         self.dom.checkpoints.pop(self._name, None)
 
 
@@ -202,6 +205,8 @@ class FakeDomain:
         self.backup_outcome = "completed"  # or "failed" / "hang" (never finishes)
         self.backup_polls = 1  # jobInfo() calls that still report the job before it ends
         self.backup_job: dict | None = None
+        self.abort_polls = 0  # jobInfo() polls that still report the job after abortJob()
+        self.checkpoint_delete_failures = 0  # the next N checkpoint deletes fail
         self.completed_job: dict | None = None
         self._ctime = 0
 
@@ -301,6 +306,12 @@ class FakeDomain:
     def jobInfo(self):
         self._check("jobInfo")
         job = self.backup_job
+        if job is not None and job.get("aborting"):
+            if job["aborting"] > 0:
+                job["aborting"] -= 1
+                return [CONSTS["VIR_DOMAIN_JOB_UNBOUNDED"]] + [0] * 11
+            self.backup_job = None
+            return [CONSTS["VIR_DOMAIN_JOB_NONE"]] + [0] * 11
         if job is None:
             return [CONSTS["VIR_DOMAIN_JOB_NONE"], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         if self.backup_outcome != "hang":

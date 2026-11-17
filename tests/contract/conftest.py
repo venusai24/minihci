@@ -11,6 +11,7 @@ from minihci.driver.base import HostDriver
 
 BASE_IMAGE = os.environ.get("MINIHCI_REAL_BASE_IMAGE", "/srv/minihci/base/base.qcow2")
 DISK_DIR = os.environ.get("MINIHCI_REAL_DISK_DIR", "/srv/minihci/images")
+DR_DIR = os.environ.get("MINIHCI_REAL_DR_DIR", "/srv/minihci/dr")
 
 
 @dataclass
@@ -20,12 +21,16 @@ class Env:
     uri2: str
     base_image: str
     disk_dir: str
+    dr_dir: str = "/dr"
 
     def name(self) -> str:
         return f"mhci-contract-{uuid.uuid4().hex[:8]}"
 
     def disk(self, name: str) -> str:
         return f"{self.disk_dir}/{name}.qcow2"
+
+    def dr_disk(self, name: str) -> str:
+        return f"{self.dr_dir}/{name}.qcow2"
 
 
 def _fake() -> Env:
@@ -44,8 +49,8 @@ def _libvirt() -> Env:
 
     hosts = [h.strip() for h in os.environ["MINIHCI_REAL_HOSTS"].split(",") if h.strip()]
     uris = [f"qemu+ssh://root@{h}/system" for h in hosts]
-    d = LibvirtDriver(storage_uris=uris, image_root=os.path.dirname(BASE_IMAGE), storage_root=DISK_DIR)
-    return Env(d, uris[0], uris[-1], BASE_IMAGE, DISK_DIR)
+    d = LibvirtDriver(storage_uris=uris, image_root=os.path.dirname(BASE_IMAGE), storage_root=DISK_DIR, dr_root=DR_DIR)
+    return Env(d, uris[0], uris[-1], BASE_IMAGE, DISK_DIR, DR_DIR)
 
 
 @pytest.fixture(

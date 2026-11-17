@@ -180,3 +180,21 @@ def test_blank_disk_uses_like_capacity(drv, stub_libvirt):
     assert drv.disk_allocation(t) == 4096
     with pytest.raises(DriverError):
         drv.disk_allocation(f"{DR}/nope.qcow2")
+
+
+def test_timeout_waits_for_slow_abort_and_retries_checkpoint_delete(drv, dom):
+    dom.backup_outcome = "hang"
+    dom.abort_polls = 3
+    dom.checkpoint_delete_failures = 1
+    with pytest.raises(DriverError, match="timed out"):
+        drv.backup_domain(U1, "vm1", T0, "c0", None)
+    assert dom.backup_job is None
+    assert drv.list_checkpoints(U1, "vm1") == []
+
+
+def test_checkpoint_still_present_after_failed_backup_is_an_error(drv, dom):
+    dom.backup_outcome = "failed"
+    dom.checkpoint_delete_failures = 5
+    with pytest.raises(DriverError, match="still present"):
+        drv.backup_domain(U1, "vm1", T0, "c0", None)
+    assert drv.list_checkpoints(U1, "vm1") == ["c0"]

@@ -654,13 +654,35 @@ class LibvirtDriver:
                 raise DriverError(f"no backup job on {name}")
             dom.abortJob()
 
-    def _drop_checkpoint(self, dom, checkpoint: str) -> None:
-        """Best effort: a failed backup must not leave its new checkpoint behind."""
-        try:
-            if checkpoint in self._sorted_checkpoints(dom):
+    ABORT_WAIT_POLLS = 20
+
+    def _wait_job_gone(self, dom) -> None:
+        """After abortJob() the job may take a few polls to disappear; the checkpoint is only safe to drop then."""
+        lib = load_libvirt()
+        for _ in range(self.ABORT_WAIT_POLLS):
+            if dom.jobInfo()[0] == lib.VIR_DOMAIN_JOB_NONE:
+                return
+            self._sleep(self.BACKUP_POLL_S)
+
+    def _drop_checkpoint(self, dom, checkpoint: str) -> bool:
+        """Delete a failed backup's new checkpoint (one retry). True if it no longer exists afterwards."""
+        for attempt in range(2):
+            try:
+                if checkpoint not in self._sorted_checkpoints(dom):
+                    return True
                 dom.checkpointLookupByName(checkpoint, 0).delete(0)
-        except Exception:
-            log.warning("could not delete checkpoint %s of a failed backup", checkpoint, exc_info=True)
+            except Exception:
+                log.warning("could not delete checkpoint %s of a failed backup", checkpoint, exc_info=True)
+            if attempt == 0:
+                self._sleep(self.BACKUP_POLL_S)
+        try:
+            return checkpoint not in self._sorted_checkpoints(dom)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _cleanup_failed(self, dom, name: str, checkpoint: str, err: BaseException) -> None:
+        if not self._drop_checkpoint(dom, checkpoint):
+            raise DriverError(f"backup of {name} failed ({err}) and checkpoint {checkpoint} is still present") from err
 
     def backup_domain(self, uri: str, name: str, target_path: str, checkpoint: str, since: str | None) -> BackupResult:
         lib = load_libvirt()
@@ -681,7 +703,7 @@ class LibvirtDriver:
                     lib.VIR_DOMAIN_BACKUP_BEGIN_REUSE_EXTERNAL,
                 )
             except lib.libvirtError as e:
-                self._drop_checkpoint(dom, checkpoint)
+                self._cleanup_failed(dom, name, checkpoint, e)
                 if since is not None and e.get_error_code() == getattr(lib, "VIR_ERR_NO_DOMAIN_CHECKPOINT", object()):
                     raise CheckpointNotFound(f"checkpoint {since} of {name} not found") from e
                 raise
@@ -690,12 +712,13 @@ class LibvirtDriver:
                     if time.monotonic() - t0 >= self._backup_timeout_s:
                         with contextlib.suppress(lib.libvirtError):
                             dom.abortJob()
+                            self._wait_job_gone(dom)
                         raise DriverError(f"backup of {name} timed out after {self._backup_timeout_s}s")
                     self._sleep(self.BACKUP_POLL_S)
                 stats = dom.jobStats(lib.VIR_DOMAIN_JOB_STATS_COMPLETED | lib.VIR_DOMAIN_JOB_STATS_KEEP_COMPLETED)
                 if stats.get("type") != lib.VIR_DOMAIN_JOB_COMPLETED:
                     raise DriverError(f"backup of {name} did not complete (job type {stats.get('type')})")
-            except BaseException:
-                self._drop_checkpoint(dom, checkpoint)
+            except BaseException as e:
+                self._cleanup_failed(dom, name, checkpoint, e)
                 raise
             return BackupResult(duration_ms=int((time.monotonic() - t0) * 1000))

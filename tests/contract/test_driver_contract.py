@@ -166,7 +166,7 @@ def test_backup_full_incremental_shapes(env: Env):
 
     d = env.driver
     with vm(env, start=True) as (name, disk, _):
-        t0, t1 = env.disk(name + "-t0"), env.disk(name + "-t1")
+        t0, t1 = env.dr_disk(name + "-t0"), env.dr_disk(name + "-t1")
         try:
             # Real-host run (owner only): the guest should also write between the two backups so the
             # incremental has data; there is no portable way to do that from here, so only the fake does it.
@@ -193,7 +193,7 @@ def test_backup_since_missing_raises_checkpoint_not_found(env: Env):
 
     d = env.driver
     with vm(env, start=True) as (name, disk, _):
-        t0 = env.disk(name + "-t0")
+        t0 = env.dr_disk(name + "-t0")
         try:
             d.create_blank_disk(t0, like=disk)
             with pytest.raises(CheckpointNotFound):
