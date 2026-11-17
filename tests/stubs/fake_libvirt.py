@@ -205,6 +205,7 @@ class FakeDomain:
         self.backup_outcome = "completed"  # or "failed" / "hang" (never finishes)
         self.backup_polls = 1  # jobInfo() calls that still report the job before it ends
         self.backup_job: dict | None = None
+        self.jobinfo_after_abort = 0  # jobInfo() calls made while an abort was pending
         self.abort_polls = 0  # jobInfo() polls that still report the job after abortJob()
         self.checkpoint_delete_failures = 0  # the next N checkpoint deletes fail
         self.completed_job: dict | None = None
@@ -306,7 +307,8 @@ class FakeDomain:
     def jobInfo(self):
         self._check("jobInfo")
         job = self.backup_job
-        if job is not None and job.get("aborting"):
+        if job is not None and job.get("aborting") is not None:
+            self.jobinfo_after_abort += 1
             if job["aborting"] > 0:
                 job["aborting"] -= 1
                 return [CONSTS["VIR_DOMAIN_JOB_UNBOUNDED"]] + [0] * 11
@@ -329,7 +331,10 @@ class FakeDomain:
         self._check("abortJob")
         if self.backup_job is None:
             raise _err("VIR_ERR_OPERATION_INVALID", "no job is active on the domain")
-        self.backup_job = None
+        if self.abort_polls > 0:
+            self.backup_job["aborting"] = self.abort_polls
+        else:
+            self.backup_job = None
         self.completed_job = {
             "type": CONSTS["VIR_DOMAIN_JOB_CANCELLED"],
             "operation": CONSTS["VIR_DOMAIN_JOB_OPERATION_BACKUP"],

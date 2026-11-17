@@ -189,6 +189,7 @@ def test_timeout_waits_for_slow_abort_and_retries_checkpoint_delete(drv, dom):
     with pytest.raises(DriverError, match="timed out"):
         drv.backup_domain(U1, "vm1", T0, "c0", None)
     assert dom.backup_job is None
+    assert dom.jobinfo_after_abort == 4  # three polls still see the job, the fourth sees NONE
     assert drv.list_checkpoints(U1, "vm1") == []
 
 
