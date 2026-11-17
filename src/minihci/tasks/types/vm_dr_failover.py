@@ -160,12 +160,23 @@ def define_domain(ctx: StepContext) -> None:
     vm = _vm(ctx)
     uri = _uri(ctx, row.dr_host_id)
     state = ctx.driver.domain_state(uri, vm.name)
-    if state is None:
-        ctx.driver.define_domain(
-            uri, DomainSpec(name=vm.name, vcpus=vm.vcpus, mem_mb=vm.mem_mb, disk_path=row.disk_path)
-        )
-    elif state.active:  # this step runs before start_domain, so an active domain of that name is not ours
+    # Steps run in order and a done step is skipped, so this step never runs after this task's start_domain (and
+    # after the switch it returned above): an active domain of that name is never ours. Refuse, touching nothing.
+    if state is not None and state.active:
         raise RuntimeError(f"a domain named {vm.name} is already {state.value} on the DR host; refusing")
+    if state is not None:
+        # Shut off: a leftover (an earlier attempt, ours from a crashed run of this step, or a stale copy). HostDriver
+        # cannot tell which disk it uses, so never trust it: replace it with this task's spec. A crash between the
+        # undefine and the define leaves no domain, and the rerun just defines.
+        ctx.driver.undefine_domain(uri, vm.name)
+    ctx.driver.define_domain(uri, DomainSpec(name=vm.name, vcpus=vm.vcpus, mem_mb=vm.mem_mb, disk_path=row.disk_path))
+
+
+def _step_ran(ctx: StepContext, name: str) -> bool:
+    """True if this task's step `name` has started at least once (the step log is recorded before each run)."""
+    with ctx.session_factory() as s:
+        steps = s.get(Task, ctx.task_id).steps or []
+    return any(st["name"] == name and st["status"] != "pending" for st in steps)
 
 
 def undo_define_domain(ctx: StepContext) -> None:
@@ -176,10 +187,19 @@ def undo_define_domain(ctx: StepContext) -> None:
     vm = _vm(ctx)
     uri = _uri(ctx, row.dr_host_id)
     state = ctx.driver.domain_state(uri, vm.name)
-    if state is not None and state.active:
+    if state is None:
+        return
+    if state.active:
+        # Only this task's start_domain can have made our domain active. If it never ran, the active domain is the
+        # foreign one define_domain refused: leave it alone.
+        if not _step_ran(ctx, "start_domain"):
+            ctx.log.warning(
+                "dr_failover_foreign_domain_kept",
+                extra={"fields": {"event": "dr_failover_foreign_domain_kept", "vm_id": vm.id, "domain": vm.name}},
+            )
+            return
         ctx.driver.destroy_domain(uri, vm.name)
-    if state is not None:
-        ctx.driver.undefine_domain(uri, vm.name)
+    ctx.driver.undefine_domain(uri, vm.name)
 
 
 def start_domain(ctx: StepContext) -> None:

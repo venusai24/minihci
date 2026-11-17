@@ -526,3 +526,122 @@ def test_rolled_back_logs_event(client, session_factory, driver, host, dr_host, 
     assert load_task(session_factory, r.json()["task_id"]).state == "rolled_back"
     recs = [rec for rec in caplog.records if getattr(rec, "fields", {}).get("event") == "dr_failover_rolled_back"]
     assert recs and recs[0].fields["vm_id"] == vm and recs[0].fields["replica_id"] == replicas[-1].id
+
+
+# ---- fix round 1: a same-name domain already on the DR host --------------------------------------------------------
+
+STALE = "/srv/minihci/dr/vm-stale.qcow2"
+
+
+def stale_domain(driver, state=DomainState.SHUT_OFF) -> None:
+    """A leftover web1 on the DR host pointing at another disk (e.g. an earlier attempt whose undo failed)."""
+    from minihci.driver.base import DomainSpec
+
+    driver.create_disk_overlay("/base.qcow2", STALE)
+    driver.define_domain(URI_DR, DomainSpec(name="web1", vcpus=1, mem_mb=512, disk_path=STALE))
+    if state != DomainState.SHUT_OFF:
+        driver.start_domain(URI_DR, "web1")
+        if state != DomainState.RUNNING:
+            driver.set_domain_state(URI_DR, "web1", state)
+
+
+def dr_disk_of(driver, name="web1") -> str:
+    """FakeDriver internals: the protocol has no call that returns a domain's disk."""
+    with driver._locked() as state:
+        return state["hosts"][URI_DR]["domains"][name]["disk_path"]
+
+
+def test_stale_shut_off_domain_on_dr_host_is_replaced(client, session_factory, driver, host, dr_host, vm, replicas):
+    stale_domain(driver)
+    kill_primary(session_factory, driver, host, replicas[-1])
+    r = failover(client, vm)
+    tid = r.json()["task_id"]
+    drain(session_factory, driver)
+    assert load_task(session_factory, tid).state == "succeeded"
+    overlay = fo_row(session_factory, tid).disk_path
+    assert driver.domain_state(URI_DR, "web1") == DomainState.RUNNING
+    assert dr_disk_of(driver) == overlay == vm_row(session_factory, vm).disk_path
+    stale_before = driver.read_disk(STALE)
+    driver.write_blocks(URI_DR, "web1", [77])
+    assert 77 in driver.read_disk(overlay)
+    assert driver.read_disk(STALE) == stale_before
+
+
+@pytest.mark.parametrize("state", [DomainState.RUNNING, DomainState.PAUSED, DomainState.CRASHED])
+def test_active_same_name_domain_on_dr_host_refuses(
+    client, session_factory, driver, host, dr_host, vm, replicas, state
+):
+    stale_domain(driver, state)
+    kill_primary(session_factory, driver, host, replicas[-1])
+    r = failover(client, vm)
+    tid = r.json()["task_id"]
+    drain(session_factory, driver)
+    t = load_task(session_factory, tid)
+    assert t.state == "rolled_back"
+    assert "already" in t.error
+    # no side effects on the foreign domain: not destroyed, not undefined, same disk
+    assert driver.domain_state(URI_DR, "web1") == state
+    assert dr_disk_of(driver) == STALE
+    assert ("destroy_domain", URI_DR, "web1") not in driver.calls
+    assert not driver.disk_exists(fo_row(session_factory, tid).disk_path)
+    assert vm_row(session_factory, vm).host_id == host
+
+
+def test_define_rerun_after_crash_between_undefine_and_define(session_factory, driver, host, dr_host, vm, replicas):
+    from minihci.tasks.types import vm_dr_failover as fo
+
+    stale_domain(driver)
+    kill_primary(session_factory, driver, host, replicas[-1])
+    ctx = step_ctx(session_factory, driver, vm, replicas[-1].id, dr_host)
+    for step in (fo.record, fo.fence_primary, fo.prepare_disk):
+        step(ctx)
+    driver.fail["define_domain"] = 1  # the stale domain is undefined, then the define dies
+    with pytest.raises(Exception, match="injected"):
+        fo.define_domain(ctx)
+    assert driver.domain_state(URI_DR, "web1") is None
+    fo.define_domain(ctx)  # the rerun finds no domain and just defines
+    assert dr_disk_of(driver) == fo_row(session_factory, ctx.task_id).disk_path
+    assert driver.domain_state(URI_DR, "web1") == DomainState.SHUT_OFF
+
+
+def test_rollback_after_start_removes_own_dr_domain(client, session_factory, driver, host, dr_host, vm, replicas):
+    from minihci.tasks.executor import Step
+    from minihci.tasks.types import vm_dr_failover as fo
+
+    def boom(ctx):
+        raise RuntimeError("switch broke")
+
+    steps = fo.VM_DR_FAILOVER.steps
+    real = steps[5]
+    steps[5] = Step("switch", boom)  # the registered TaskType is frozen; swap the list item and restore it
+    try:
+        kill_primary(session_factory, driver, host, replicas[-1])
+        tid = failover(client, vm).json()["task_id"]
+        drain(session_factory, driver)
+    finally:
+        steps[5] = real
+    assert load_task(session_factory, tid).state == "rolled_back"
+    assert ("start_domain", URI_DR, "web1") in driver.calls
+    assert driver.domain_state(URI_DR, "web1") is None  # destroyed (undo start) and undefined (undo define)
+    assert not driver.disk_exists(fo_row(session_factory, tid).disk_path)
+    assert vm_row(session_factory, vm).host_id == host
+
+
+def test_undo_define_destroys_own_domain_when_undo_start_failed(session_factory, driver, host, dr_host, vm, replicas):
+    from minihci.tasks.types import vm_dr_failover as fo
+
+    kill_primary(session_factory, driver, host, replicas[-1])
+    ctx = step_ctx(session_factory, driver, vm, replicas[-1].id, dr_host)
+    with session_factory() as s, s.begin():  # the step log the executor would have written
+        s.get(Task, ctx.task_id).steps = [
+            {"name": n, "status": "done", "started_at": None, "finished_at": None, "error": None}
+            for n in ("record", "fence_primary", "prepare_disk", "define_domain", "start_domain")
+        ] + [{"name": "switch", "status": "failed", "started_at": None, "finished_at": None, "error": "x"}]
+    for step in (fo.record, fo.fence_primary, fo.prepare_disk, fo.define_domain, fo.start_domain):
+        step(ctx)
+    driver.fail["destroy_domain"] = 1
+    with pytest.raises(Exception, match="injected"):
+        fo.undo_start_domain(ctx)
+    assert driver.domain_state(URI_DR, "web1") == DomainState.RUNNING
+    fo.undo_define_domain(ctx)  # this task's start ran: the active domain is ours
+    assert driver.domain_state(URI_DR, "web1") is None
