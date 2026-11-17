@@ -7,7 +7,8 @@ from prometheus_client.core import GaugeMetricFamily, HistogramMetricFamily, Met
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
-from minihci.models import HaRestart, Host, Migration, Task, Vm
+from minihci.api import dr as dr_api
+from minihci.models import HaRestart, Host, Migration, ProtectionPolicy, Replica, Task, Vm
 
 router = APIRouter()
 
@@ -32,6 +33,46 @@ class DbCollector:
         yield from self._hosts()
         yield from self._migrations()
         yield from self._ha()
+        yield from self._replication()
+
+    def _replication(self) -> Iterator[Metric]:
+        now = dr_api._now()
+        with self._sf() as s:
+            pols = s.execute(
+                select(ProtectionPolicy, Vm.name)
+                .join(Vm, Vm.id == ProtectionPolicy.vm_id)
+                .where(ProtectionPolicy.enabled.is_(True), Vm.desired_state != "absent")
+                .order_by(Vm.name)
+            ).all()
+            statuses = [(name, dr_api.protection_status(s, p, now)) for p, name in pols]
+            counts = s.execute(
+                select(Replica.mode, Replica.status, func.count()).group_by(Replica.mode, Replica.status)
+            ).all()
+            sizes = s.execute(
+                select(Replica.mode, func.coalesce(func.sum(Replica.size_bytes), 0))
+                .where(Replica.status.in_(("succeeded", "pruned")))
+                .group_by(Replica.mode)
+            ).all()
+        lag = GaugeMetricFamily(
+            "minihci_replication_lag_seconds", "Seconds since the VM's newest replica", labels=["vm"]
+        )
+        within = GaugeMetricFamily(
+            "minihci_replication_within_target", "1 when the VM meets its RPO target (D-036)", labels=["vm"]
+        )
+        for name, st in statuses:
+            if st["lag_s"] is not None:  # at least one replica
+                lag.add_metric([name], st["lag_s"])
+                within.add_metric([name], 1.0 if st["within_target"] else 0.0)
+        yield lag
+        yield within
+        reps = GaugeMetricFamily("minihci_replicas", "Replicas by mode and status", labels=["mode", "status"])
+        for mode, status, n in counts:
+            reps.add_metric([mode, status], n)
+        yield reps
+        by = GaugeMetricFamily("minihci_replica_bytes", "Bytes held by succeeded and pruned replicas", labels=["mode"])
+        for mode, total in sizes:
+            by.add_metric([mode], float(total))
+        yield by
 
     def _ha(self) -> Iterator[Metric]:
         with self._sf() as s:

@@ -296,3 +296,61 @@ def test_metrics_vms_unhealthy_counts_paused_ioerror_only(session_factory):
         s.commit()
     client = TestClient(create_app(Settings(), session_factory=session_factory))
     assert _samples(client.get("/metrics").text, "minihci_vms_unhealthy") == {(): 2}
+
+
+def test_replication_metrics(session_factory, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from minihci.api import dr as dr_api
+    from minihci.models import Host, ProtectionPolicy, Replica, Task, Vm
+
+    now = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(dr_api, "_now", lambda: now)
+    with session_factory() as s, s.begin():
+        h = Host(name="h", libvirt_uri="u", status="ready", cpu_total=8, mem_total_mb=1024)
+        s.add(h)
+        s.flush()
+        h_id = h.id
+        vms = []
+        for n in ("v1", "v2", "v3"):
+            v = Vm(name=n, host_id=h_id, vcpus=1, mem_mb=64, image="x", disk_path=f"/d/{n}", desired_state="running")
+            s.add(v)
+            vms.append(v)
+        s.flush()
+        v1, v2, v3 = (v.id for v in vms)
+        for vid, enabled in ((v1, True), (v2, True), (v3, False)):
+            s.add(ProtectionPolicy(vm_id=vid, interval_s=60, retention=3, enabled=enabled))
+        specs = [
+            (v1, "full", "succeeded", 100, 1000),
+            (v1, "incremental", "succeeded", 30, 50),
+            (v1, "incremental", "pruned", 120, 7),
+            (v1, "full", "failed", 10, None),
+            (v3, "full", "succeeded", 10, 5),
+        ]
+        for vid, mode, status, ago, size in specs:
+            t = Task(type="vm.replicate", target_id=vid, state="succeeded")
+            s.add(t)
+            s.flush()
+            snap = now - timedelta(seconds=ago)
+            s.add(
+                Replica(
+                    vm_id=vid,
+                    task_id=t.id,
+                    host_id=h_id,
+                    mode=mode,
+                    status=status,
+                    seq=0,
+                    snapshot_time=snap,
+                    finished_at=snap,
+                    size_bytes=size,
+                )
+            )
+    client = TestClient(create_app(Settings(), session_factory=session_factory))
+    text = client.get("/metrics").text
+    assert _samples(text, "minihci_replication_lag_seconds") == {(("vm", "v1"),): 30.0}
+    assert _samples(text, "minihci_replication_within_target") == {(("vm", "v1"),): 1.0}
+    reps = _samples(text, "minihci_replicas")
+    assert reps[(("mode", "full"), ("status", "succeeded"))] == 2
+    assert reps[(("mode", "incremental"), ("status", "pruned"))] == 1
+    assert reps[(("mode", "full"), ("status", "failed"))] == 1
+    assert _samples(text, "minihci_replica_bytes") == {(("mode", "full"),): 1005.0, (("mode", "incremental"),): 57.0}
