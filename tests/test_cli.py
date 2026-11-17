@@ -339,6 +339,106 @@ def test_scheduler_set_nothing(monkeypatch):
     assert reqs == []
 
 
+def test_vms_protect_sends_body(monkeypatch):
+    seen = []
+
+    def h(r):
+        seen.append((r.method, r.url.path, json.loads(r.content), r.headers.get("Idempotency-Key")))
+        return httpx.Response(202, json={"task_id": 5, "target_id": 3})
+
+    _install(monkeypatch, h)
+    res = runner.invoke(
+        cli.app, ["vms", "protect", "3", "--interval", "60", "--retention", "4", "--idempotency-key", "k1"]
+    )
+    assert res.exit_code == 0, res.output
+    assert res.stdout.strip() == "5"
+    assert seen == [("PUT", "/vms/3/protection", {"interval_s": 60, "retention": 4, "enabled": True}, "k1")]
+    seen.clear()
+    res = runner.invoke(cli.app, ["vms", "protect", "3", "--interval", "60", "--retention", "4", "--disable"])
+    assert res.exit_code == 0, res.output
+    assert seen[0][2]["enabled"] is False
+
+
+def test_vms_protection_show_and_404(monkeypatch):
+    _install(monkeypatch, lambda r: httpx.Response(200, json={"vm_id": 3, "interval_s": 60, "lag_s": None}))
+    res = runner.invoke(cli.app, ["vms", "protection", "3"])
+    assert res.exit_code == 0, res.output
+    assert "interval_s: 60" in res.stdout
+    _install(monkeypatch, lambda r: httpx.Response(404, json={"detail": "no protection policy for this vm"}))
+    res = runner.invoke(cli.app, ["vms", "protection", "3"])
+    assert res.exit_code == 1
+    assert "no protection policy" in res.stderr
+
+
+def test_vms_failover_force_wait_success(monkeypatch):
+    seen = []
+
+    def h(r):
+        if r.method == "POST":
+            seen.append((r.url.path, r.content))
+            return httpx.Response(202, json={"task_id": 8, "target_id": 3})
+        return httpx.Response(200, json={**TASK, "id": 8, "state": "succeeded"})
+
+    _install(monkeypatch, h)
+    res = runner.invoke(cli.app, ["vms", "failover", "3", "--force", "--replica", "9", "--host", "2", "--wait"])
+    assert res.exit_code == 0, res.output
+    assert "succeeded" in res.stdout
+    assert seen[0][0] == "/vms/3/failover"
+    assert json.loads(seen[0][1]) == {"replica_id": 9, "host_id": 2, "force": True}
+
+
+def test_vms_failover_minimal_body(monkeypatch):
+    seen = []
+
+    def h(r):
+        seen.append(r.content)
+        return httpx.Response(202, json={"task_id": 8, "target_id": 3})
+
+    _install(monkeypatch, h)
+    assert runner.invoke(cli.app, ["vms", "failover", "3"]).exit_code == 0
+    assert runner.invoke(cli.app, ["vms", "failover", "3", "--host", "2"]).exit_code == 0
+    assert seen[0] == b""
+    assert json.loads(seen[1]) == {"host_id": 2}
+
+
+def test_vms_failover_409_exit_1(monkeypatch):
+    _install(monkeypatch, lambda r: httpx.Response(409, json={"detail": "vm has no succeeded replica"}))
+    res = runner.invoke(cli.app, ["vms", "failover", "3"])
+    assert res.exit_code == 1
+    assert "vm has no succeeded replica" in res.stderr
+
+
+def test_replication_table(monkeypatch):
+    row = {
+        "vm_id": 3,
+        "vm_name": "web1",
+        "interval_s": 60,
+        "last_replicated_at": None,
+        "lag_s": None,
+        "achieved_rpo_s": None,
+        "within_target": False,
+    }
+    _install(monkeypatch, lambda r: httpx.Response(200, json=[row]))
+    res = runner.invoke(cli.app, ["replication"])
+    assert res.exit_code == 0, res.output
+    assert "VM_NAME" in res.stdout
+    line = res.stdout.splitlines()[1].split()
+    assert line == ["3", "web1", "60", "-", "-", "-", "False"]
+    assert "None" not in res.stdout
+    res = runner.invoke(cli.app, ["--json", "replication"])
+    assert json.loads(res.stdout) == [row]
+
+
+def test_vms_replicas_json(monkeypatch):
+    rows = [{"id": 1, "mode": "full", "status": "succeeded", "seq": 0, "snapshot_time": "t", "duration_ms": 5}]
+    _install(monkeypatch, lambda r: httpx.Response(200, json=rows))
+    res = runner.invoke(cli.app, ["--json", "vms", "replicas", "3"])
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout) == rows
+    res = runner.invoke(cli.app, ["vms", "replicas", "3"])
+    assert "SNAPSHOT_TIME" in res.stdout and "SIZE_BYTES" in res.stdout
+
+
 def test_end_to_end_against_api(monkeypatch, session_factory):
     from fastapi.testclient import TestClient
 

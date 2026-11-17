@@ -277,6 +277,57 @@ def vms_rm(
     submit(ctx, "DELETE", f"/vms/{vm_id}", None, idempotency_key, wait)
 
 
+@vms_app.command("protect")
+def vms_protect(
+    ctx: typer.Context,
+    vm_id: int,
+    interval: int = typer.Option(..., "--interval", help="Replication interval in seconds"),
+    retention: int = typer.Option(..., "--retention", help="Replicas to keep"),
+    disable: bool = typer.Option(False, "--disable", help="Keep the policy but pause replication"),
+    idempotency_key: str | None = IDEMPOTENCY_OPT,
+    wait: bool = WAIT_OPT,
+) -> None:
+    body = {"interval_s": interval, "retention": retention, "enabled": not disable}
+    submit(ctx, "PUT", f"/vms/{vm_id}/protection", body, idempotency_key, wait)
+
+
+@vms_app.command("protection")
+def vms_protection(ctx: typer.Context, vm_id: int) -> None:
+    output(ctx, request(ctx, "GET", f"/vms/{vm_id}/protection"))
+
+
+@vms_app.command("replicas")
+def vms_replicas(ctx: typer.Context, vm_id: int) -> None:
+    cols = ["id", "mode", "status", "seq", "snapshot_time", "size_bytes", "duration_ms"]
+    output(ctx, request(ctx, "GET", f"/vms/{vm_id}/replicas"), cols)
+
+
+@vms_app.command("failover")
+def vms_failover(
+    ctx: typer.Context,
+    vm_id: int,
+    replica: int | None = typer.Option(None, "--replica", help="Replica id (default: newest succeeded)"),
+    host: int | None = typer.Option(None, "--host", help="DR-site host id (default: any with capacity)"),
+    force: bool = typer.Option(False, "--force", help="Fail over even if the source host is not dead"),
+    idempotency_key: str | None = IDEMPOTENCY_OPT,
+    wait: bool = WAIT_OPT,
+) -> None:
+    fields = {"replica_id": replica, "host_id": host, "force": True if force else None}
+    body = {k: v for k, v in fields.items() if v is not None}
+    submit(ctx, "POST", f"/vms/{vm_id}/failover", body or None, idempotency_key, wait)
+
+
+@app.command("replication")
+def replication(ctx: typer.Context) -> None:
+    data = request(ctx, "GET", "/replication")
+    if ctx.obj.json:
+        output(ctx, data)
+        return
+    cols = ["vm_id", "vm_name", "interval_s", "last_replicated_at", "lag_s", "achieved_rpo_s", "within_target"]
+    rows = [{c: "-" if r.get(c) is None else r[c] for c in cols} for r in data]
+    print_table(rows, cols)
+
+
 scheduler_app = typer.Typer(help="Scheduler configuration", no_args_is_help=True)
 app.add_typer(scheduler_app, name="scheduler")
 
