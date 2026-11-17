@@ -326,6 +326,7 @@ def test_replication_metrics(session_factory, monkeypatch):
             (v1, "incremental", "pruned", 120, 7),
             (v1, "full", "failed", 10, None),
             (v3, "full", "succeeded", 10, 5),
+            (v2, "full", "succeeded", 3 * 86400, None),  # stale: series must still be present
         ]
         for vid, mode, status, ago, size in specs:
             t = Task(type="vm.replicate", target_id=vid, state="succeeded")
@@ -347,10 +348,10 @@ def test_replication_metrics(session_factory, monkeypatch):
             )
     client = TestClient(create_app(Settings(), session_factory=session_factory))
     text = client.get("/metrics").text
-    assert _samples(text, "minihci_replication_lag_seconds") == {(("vm", "v1"),): 30.0}
-    assert _samples(text, "minihci_replication_within_target") == {(("vm", "v1"),): 1.0}
+    assert _samples(text, "minihci_replication_lag_seconds") == {(("vm", "v1"),): 30.0, (("vm", "v2"),): 259200.0}
+    assert _samples(text, "minihci_replication_within_target") == {(("vm", "v1"),): 1.0, (("vm", "v2"),): 0.0}
     reps = _samples(text, "minihci_replicas")
-    assert reps[(("mode", "full"), ("status", "succeeded"))] == 2
+    assert reps[(("mode", "full"), ("status", "succeeded"))] == 3
     assert reps[(("mode", "incremental"), ("status", "pruned"))] == 1
     assert reps[(("mode", "full"), ("status", "failed"))] == 1
     assert _samples(text, "minihci_replica_bytes") == {(("mode", "full"),): 1005.0, (("mode", "incremental"),): 57.0}

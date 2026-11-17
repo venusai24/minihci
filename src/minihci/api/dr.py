@@ -5,7 +5,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from minihci.api.deps import get_session
@@ -78,8 +78,18 @@ def put_protection(
 
 
 def protection_status(s: Session, p: ProtectionPolicy, now: datetime) -> dict[str, Any]:
-    rows = list(s.scalars(select(Replica).where(Replica.vm_id == p.vm_id, Replica.status.in_(("succeeded", "pruned")))))
+    """lag_s / last_replicated_at come from the newest succeeded replica regardless of age (a stale VM must
+    still report its lag); achieved_rpo_s comes from succeeded+pruned rows inside RPO_WINDOW, filtered in SQL."""
     cutoff = now - RPO_WINDOW
+    rows = s.scalars(
+        select(Replica)
+        .where(
+            Replica.vm_id == p.vm_id,
+            Replica.status.in_(("succeeded", "pruned")),
+            Replica.snapshot_time >= cutoff,
+        )
+        .order_by(Replica.snapshot_time, Replica.id)
+    )
     history = [
         ReplicaInfo(
             id=r.id,
@@ -91,20 +101,24 @@ def protection_status(s: Session, p: ProtectionPolicy, now: datetime) -> dict[st
             finished_at=_aware(r.finished_at or r.snapshot_time),
         )
         for r in rows
-        if r.snapshot_time is not None and _aware(r.snapshot_time) >= cutoff
     ]
-    st = rpo_status(history, p.interval_s, now)
+    ok = (Replica.vm_id == p.vm_id, Replica.status == "succeeded")
+    replica_count = s.scalar(select(func.count()).select_from(Replica).where(*ok)) or 0
+    newest = s.scalar(select(func.max(Replica.snapshot_time)).where(*ok))
+    st = rpo_status(history, p.interval_s, now)  # adapter: only achieved_rpo_s and target_s are used from it
+    lag = (now - _aware(newest)).total_seconds() if newest is not None else None
+    within = lag is not None and max(st.achieved_rpo_s or 0, lag) <= st.target_s
     return {
         "vm_id": p.vm_id,
         "interval_s": p.interval_s,
         "retention": p.retention,
         "enabled": p.enabled,
-        "last_replicated_at": _ts(st.last_snapshot_at),
-        "lag_s": st.lag_s,
+        "last_replicated_at": _ts(newest),
+        "lag_s": lag,
         "achieved_rpo_s": st.achieved_rpo_s,
         "rpo_target_s": st.target_s,
-        "within_target": st.within_target,
-        "replica_count": sum(1 for r in rows if r.status == "succeeded"),
+        "within_target": within,
+        "replica_count": replica_count,
     }
 
 

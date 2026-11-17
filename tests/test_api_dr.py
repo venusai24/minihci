@@ -164,6 +164,28 @@ def test_status_counts_succeeded_only_and_pruned_feed_history(client, session_fa
     assert j["lag_s"] == 30 and j["achieved_rpo_s"] == 75
 
 
+def test_status_stale_replica_older_than_window_still_has_lag(client, session_factory, vm):
+    policy(session_factory, vm, interval=60)
+    replica(session_factory, vm, snap_ago=3 * 86400)
+    j = client.get(f"/vms/{vm}/protection").json()
+    assert j["replica_count"] == 1
+    assert j["lag_s"] == 3 * 86400
+    assert j["last_replicated_at"] == "2026-02-26T12:00:00Z"
+    assert j["achieved_rpo_s"] is None
+    assert j["within_target"] is False
+
+
+def test_status_window_excludes_old_rows_from_achieved_rpo(client, session_factory, vm):
+    policy(session_factory, vm, interval=60)
+    replica(session_factory, vm, snap_ago=3 * 86400)  # outside the 24h window: must not set achieved_rpo_s
+    replica(session_factory, vm, snap_ago=50, took=5)
+    j = client.get(f"/vms/{vm}/protection").json()
+    assert j["replica_count"] == 2
+    assert j["lag_s"] == 50
+    assert j["achieved_rpo_s"] is None  # only one row inside the window
+    assert j["within_target"] is True
+
+
 def test_status_policy_without_replicas(client, session_factory, vm):
     policy(session_factory, vm)
     r = client.get(f"/vms/{vm}/protection")
