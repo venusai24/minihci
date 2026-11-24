@@ -33,6 +33,18 @@ CLI / REST client
 - Hosts are libvirt hosts reached over `qemu+ssh://`. VM disks are qcow2 overlays on NFS, so a
   VM can be started or migrated on any host that mounts the share.
 
+## Run it on another machine
+
+```
+git clone <your-repo-url> minihci && cd minihci
+uv sync
+bash scripts/dev-db.sh        # starts PostgreSQL in a podman container
+uv run alembic upgrade head
+uv run pytest -q -m "not real_hosts"
+```
+
+See the quick start below to start the API and worker.
+
 ## Quick start (FakeDriver, no real hosts)
 
 Needs Python 3.12, [uv](https://docs.astral.sh/uv/) and podman (for PostgreSQL).
