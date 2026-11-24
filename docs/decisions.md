@@ -4,7 +4,7 @@ Entries D-001 to D-011 were backfilled by Q00 from code that already existed at 
 New entries are appended as `## D-NNN <title>` with Context / Decision / Consequences / How to undo.
 
 ## D-001 SQLAlchemy 2 ORM models, one Alembic revision per schema change
-- **Context:** The autopilot notes asked for SQLAlchemy Core. The existing code already uses ORM models.
+- **Context:** The original design notes asked for SQLAlchemy Core. The existing code already uses ORM models.
 - **Decision:** Keep the declarative ORM models in `src/minihci/models.py` (Host, Vm, Task) and
   short sessions from `db.make_session_factory`. Schema changes go in new Alembic revisions after
   `migrations/versions/0001_core.py`. States are enforced by CHECK constraints in the database.
@@ -13,7 +13,7 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
 - **How to undo:** Convert the models to `Table` objects. Callers use `s.get()`/`select(Model)`.
 
 ## D-002 Task claiming: FIFO with FOR UPDATE SKIP LOCKED
-- **Context:** Several worker threads must never claim the same task (FR-2.1, CLAUDE.md).
+- **Context:** Several worker threads must never claim the same task (FR-2.1, project rules).
 - **Decision:** `tasks.engine.claim_next` selects the lowest-id `pending` row with
   `FOR UPDATE SKIP LOCKED LIMIT 1`. In the same transaction it sets `running`, `attempts += 1` and `started_at`.
 - **Consequences:** No double claims (tested concurrently). Tasks have no priority. `attempts`
@@ -56,7 +56,7 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
 - **How to undo:** Move keys to their own table with a TTL.
 
 ## D-006 Step log as JSONB on the task, one commit per transition
-- **Context:** A restarted worker must know how far a task got (FR-2.4, CLAUDE.md).
+- **Context:** A restarted worker must know how far a task got (FR-2.4, project rules).
 - **Decision:** `tasks.steps` is a list of `{name, status, started_at, finished_at, error}`. The
   executor fills it in from the TaskType the first time the task runs. Each transition
   (`pending→running→done`, `failed`, `undone`, `undo_failed`) is its own committed transaction,
@@ -271,7 +271,7 @@ New entries are appended as `## D-NNN <title>` with Context / Decision / Consequ
 ## D-022 Placement: best-fit on allocated memory, 80% vCPU headroom, config row changed by a task
 - **Context:** FR-3.2 asks for a documented policy when `POST /vms` names no host, and a 409 when
   nothing fits. Measured host load (Q07) does not exist yet, and the PRD does not say how the
-  scheduler config is stored or changed. CLAUDE.md requires every mutating endpoint to write a task row.
+  scheduler config is stored or changed. The project rules require every mutating endpoint to write a task row.
 - **Decision:** `scheduler/placement.py` `place(vm_req, hosts, usage, config)` is pure. Candidates
   are hosts whose status is in `PLACEABLE_STATUSES = ("ready",)` (Q10 changes it to `up`) and whose
   `cpu_total`/`mem_total_mb` are known. Usage is *allocated*, not measured: sums of `vcpus`/`mem_mb`

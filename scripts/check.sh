@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MiniHCI quality gate. Exits non-zero on any failure. Protected from autopilot edits.
+# MiniHCI quality gate. Exits non-zero on any failure.
 #   bash scripts/check.sh              full gate (all tests, CRASH_ITERS default 20)
 #   CHECK_FAST=1 bash scripts/check.sh fast gate for every commit (skips tests marked slow)
 set -euo pipefail

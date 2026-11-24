@@ -22,7 +22,7 @@ def test_relative_links_resolve():
 
 
 def test_benchmark_numbers_are_sourced():
-    sources = (ROOT / "autopilot" / "QUEUE.md").read_text()
+    sources = ""
     bench_dir = ROOT / "docs" / "benchmarks"
     if bench_dir.is_dir():
         sources += "\n".join(p.read_text() for p in bench_dir.glob("*.md"))
@@ -32,7 +32,7 @@ def test_benchmark_numbers_are_sourced():
     assert numbers
     for n in numbers:
         found = re.search(rf"(?<![\w.]){re.escape(n)}(?![\w])", sources)
-        assert found, f"number {n} not found in QUEUE.md or docs/benchmarks"
+        assert found, f"number {n} not found in docs/benchmarks"
 
 
 def test_benchmarks_are_labelled_preliminary_and_have_tbd_rows():

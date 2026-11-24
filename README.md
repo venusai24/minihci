@@ -8,7 +8,7 @@ through a REST API and a thin CLI.
 Status: the API, the task engine, the worker, the libvirt driver, HA and the CLI are built. The
 web dashboard (`ui/`) is not built yet. The disaster-recovery milestone is not started.
 
-Spec: [PRD](docs/superpowers/specs/MiniHCI-PRD.md). Decisions: [docs/decisions.md](docs/decisions.md).
+Spec: [PRD](docs/PRD.md). Decisions: [docs/decisions.md](docs/decisions.md).
 
 ## Architecture
 
